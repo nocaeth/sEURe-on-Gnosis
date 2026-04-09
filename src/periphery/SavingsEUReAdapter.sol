@@ -3,9 +3,12 @@ pragma solidity ^0.8.19;
 
 import "../interfaces/IInterestReceiver.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
+import {SafeERC20} from "openzeppelin/token/ERC20/utils/SafeERC20.sol";
 import {SavingsEURe} from "../SavingsEURe.sol";
 
 contract SavingsEUReAdapter {
+    using SafeERC20 for IERC20;
+
     IInterestReceiver public immutable interestReceiver;
     SavingsEURe public immutable sEURe;
     IERC20 public immutable eure = IERC20(0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430);
@@ -19,19 +22,19 @@ contract SavingsEUReAdapter {
     // only EOAs are able to claim interest.
     modifier claim() {
         if (msg.sender == tx.origin) {
-            interestReceiver.claim();
+            try interestReceiver.claim() {} catch {}
         }
         _;
     }
 
     function deposit(uint256 assets, address receiver) public claim() returns (uint256) {
-        eure.transferFrom(msg.sender, address(this), assets);
+        eure.safeTransferFrom(msg.sender, address(this), assets);
         uint256 shares = sEURe.deposit(assets, receiver);
         return shares;
     }
 
     function mint(uint256 shares, address receiver) public claim() returns (uint256) {
-        eure.transferFrom(msg.sender, address(this), sEURe.convertToAssets(shares));
+        eure.safeTransferFrom(msg.sender, address(this), sEURe.previewMint(shares));
         uint256 assets = sEURe.mint(shares, receiver);
         return assets;
     }

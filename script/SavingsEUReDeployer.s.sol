@@ -36,7 +36,7 @@ contract SavingsEUReDeployer is Script {
         InterestReceiver interestReceiver = new InterestReceiver(address(sEURe));
         console.log("Deployed InterestReceiver: %s", address(interestReceiver));
 
-        SavingsEUReAdapter adapter = new SavingsEUReAdapter(address(interestReceiver), payable(sEURe));
+        SavingsEUReAdapter adapter = new SavingsEUReAdapter(address(interestReceiver), payable(address(sEURe)));
         console.log("Deployed SavingsEUReAdapter on Gnosis: %s", address(adapter));
 
         interestReceiver.setClaimer(address(adapter));

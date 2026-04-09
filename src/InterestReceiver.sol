@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: agpl-3
 pragma solidity ^0.8.19;
 
-import "openzeppelin/interfaces/IERC4626.sol";
 import "openzeppelin/proxy/utils/Initializable.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin/token/ERC20/utils/SafeERC20.sol";
@@ -11,20 +10,18 @@ contract InterestReceiver is Initializable {
     using SafeERC20 for IERC20;
 
     IERC20 public immutable eure = IERC20(0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430);
-    address public vault;
-    SavingsEURe private sEURe;
+    SavingsEURe public immutable sEURe;
     address public claimer;
 
     uint256 public dripRate;
     uint256 public nextClaimEpoch;
     uint256 public currentEpochBalance;
     uint256 public lastClaimTimestamp;
-    uint256 public epochLength = 3 days;
+    uint256 public constant epochLength = 3 days;
 
     event Claimed(uint256 indexed amount);
 
     constructor(address _vault) {
-        vault = _vault;
         sEURe = SavingsEURe(payable(_vault));
         claimer = msg.sender;
     }
@@ -43,7 +40,8 @@ contract InterestReceiver is Initializable {
      * @dev Initialize receiver, require minimum balance to not set a dripRate of 0
      */
     function initialize() public initializer {
-        currentEpochBalance = _aggregateBalance();
+        require(msg.sender == claimer, "Not Claimer");
+        currentEpochBalance = _balance();
         require(currentEpochBalance > 10000 ether, "Fill it up first");
         lastClaimTimestamp = block.timestamp;
         // Set custom first epoch balance or length
@@ -57,12 +55,12 @@ contract InterestReceiver is Initializable {
         if (lastClaimTimestamp == block.timestamp) {
             return 0;
         }
-        uint256 balance = _aggregateBalance();
+        uint256 balance = _balance();
         if (balance > 0) {
             (claimed) = _calcClaimable(balance);
             lastClaimTimestamp = block.timestamp;
 
-            eure.safeTransfer(vault, claimed);
+            eure.safeTransfer(address(sEURe), claimed);
             emit Claimed(claimed);
         }
         return claimed;
@@ -74,6 +72,7 @@ contract InterestReceiver is Initializable {
         // If a full epoch has passed since last claim, claim the full balance
         if (unclaimedTime >= epochLength) {
             claimable = currentEpochBalance;
+            currentEpochBalance = 0;
         } else {
             // otherwise release the amount dripped during that time
             claimable = unclaimedTime * dripRate;
@@ -87,23 +86,20 @@ contract InterestReceiver is Initializable {
         }
         // If current time is past next epoch starting time update dripRate
         if (block.timestamp > nextClaimEpoch) {
-            // If post-claim balance too low wait for more deposits and set rate to 0
-            if ((balance - claimable) < 1000 ether) {
+            uint256 remaining = balance - claimable;
+            if (remaining < 1000 ether) {
                 dripRate = 0;
+                currentEpochBalance = 0;
             } else {
-                // If post-claim balance is significant set new dripRate and start a new Epoch
-                dripRate = (balance - claimable) / epochLength;
-                currentEpochBalance = balance - claimable;
+                dripRate = remaining / epochLength;
+                currentEpochBalance = remaining;
                 nextClaimEpoch = block.timestamp + epochLength;
             }
         }
         return claimable;
     }
 
-    /**
-     * @dev Return the EURe balance of this contract
-     */
-    function _aggregateBalance() internal view returns (uint256 balance) {
+    function _balance() internal view returns (uint256) {
         return eure.balanceOf(address(this));
     }
 
@@ -132,12 +128,14 @@ contract InterestReceiver is Initializable {
      */
     function vaultAPY() external view returns (uint256) {
         uint256 deposits = sEURe.totalAssets();
+        if (deposits == 0) return 0;
         uint256 annualYield = (dripRate * 365 days);
         return (1 ether * annualYield) / deposits;
     }
 
     function setClaimer(address newClaimer) external {
         require(claimer == msg.sender, "Not Claimer");
+        require(newClaimer != address(0), "Zero address");
         claimer = newClaimer;
     }
 }

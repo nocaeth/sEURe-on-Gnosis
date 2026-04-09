@@ -3,7 +3,6 @@ pragma solidity ^0.8.19;
 
 import "openzeppelin/token/ERC20/extensions/ERC4626.sol";
 import {IERC20Permit} from "openzeppelin/token/ERC20/extensions/IERC20Permit.sol";
-import {ECDSA} from "openzeppelin/utils/cryptography/ECDSA.sol";
 import {EIP712} from "openzeppelin/utils/cryptography/EIP712.sol";
 import {Nonces} from "openzeppelin/utils/Nonces.sol";
 
@@ -41,6 +40,10 @@ contract SavingsEURe is ERC4626, IERC20Permit, EIP712, Nonces {
     {
         deploymentChainId = block.chainid;
         _DOMAIN_SEPARATOR = _calculateDomainSeparator(block.chainid);
+    }
+
+    function _decimalsOffset() internal pure override returns (uint8) {
+        return 3;
     }
 
     // --- Approve by signature ---

@@ -3,7 +3,7 @@ pragma solidity ^0.8.18;
 
 interface IInterestReceiver {
     // mutations
-    function claim() external;
+    function claim() external returns (uint256);
 
     // view functions
     function vaultAPY() external view returns (uint256);

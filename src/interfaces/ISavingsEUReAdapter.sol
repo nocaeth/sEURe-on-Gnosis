@@ -8,7 +8,7 @@ interface ISavingsEUReAdapter {
     function redeem(uint256 shares, address receiver) external returns (uint256);
     function redeemAll(address receiver) external returns (uint256);
     function sEURe() external view returns (address);
-    function vaultAPY() external returns (uint256);
+    function vaultAPY() external view returns (uint256);
     function withdraw(uint256 assets, address receiver) external returns (uint256);
     function eure() external view returns (address);
 }

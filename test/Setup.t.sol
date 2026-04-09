@@ -7,6 +7,7 @@ import {SavingsEURe} from "src/SavingsEURe.sol";
 import {InterestReceiver} from "src/InterestReceiver.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
 import "src/periphery/SavingsEUReAdapter.sol";
+import "./Mocks/MockEURe.sol";
 
 contract SetupTest is Test {
     address public initializer = address(18);
@@ -20,6 +21,10 @@ contract SetupTest is Test {
     uint256 public epoch;
 
     function setUp() public {
+        // Deploy mock ERC-20 bytecode at the EURe address for local testing
+        MockEURe mockEure = new MockEURe();
+        vm.etch(address(eure), address(mockEure).code);
+
         vm.startPrank(initializer);
 
         /*//////////////////////////////////////////////////////////////
@@ -32,7 +37,7 @@ contract SetupTest is Test {
         rcv = new InterestReceiver(address(sEURe));
         console.log("Deployed InterestReceiver: %s", address(rcv));
 
-        adapter = new SavingsEUReAdapter(address(rcv), payable(sEURe));
+        adapter = new SavingsEUReAdapter(address(rcv), payable(address(sEURe)));
         console.log("Deployed SavingsEUReAdapter on Gnosis: %s", address(adapter));
         vm.stopPrank();
 
@@ -78,9 +83,9 @@ contract SetupTest is Test {
 
     function setClaimerAndInitialize() public {
         vm.startPrank(initializer);
-        rcv.setClaimer(address(adapter));
         deal(address(eure), address(rcv), 10001 ether);
         rcv.initialize();
+        rcv.setClaimer(address(adapter));
         vm.stopPrank();
     }
 

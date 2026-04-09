@@ -17,18 +17,23 @@ contract InterestReceiverTest is SetupTest {
     function testAlreadyInitialized() public {
         setClaimerAndInitialize();
         vm.startPrank(initializer);
-        vm.expectRevert(abi.encodeWithSignature("AlreadyInitialized()"));
+        vm.expectRevert(abi.encodeWithSignature("InvalidInitialization()"));
         rcv.initialize();
     }
 
-    function testInitialize_anyoneAllowed() external {
-        vm.startPrank(alice);
+    function testInitialize_onlyClaimerAllowed() external {
         deal(address(eure), address(rcv), 50000 ether);
+        vm.startPrank(alice);
+        vm.expectRevert("Not Claimer");
+        rcv.initialize();
+        vm.stopPrank();
+        // claimer (initializer) can initialize
+        vm.startPrank(initializer);
         rcv.initialize();
     }
 
     function testInitialize_notEnoughBalance() external {
-        vm.startPrank(alice);
+        vm.startPrank(initializer);
         deal(address(eure), address(rcv), 5000 ether);
         vm.expectRevert("Fill it up first");
         rcv.initialize();
@@ -244,11 +249,13 @@ contract InterestReceiverTest is SetupTest {
         skipFirstEpoch();
         skipTime(epoch);
         uint256 rate = rcv.dripRate();
-        assertEq(rate, rcv.currentEpochBalance() / epoch);
+        uint256 epochBal = rcv.currentEpochBalance();
+        assertEq(rate, epochBal / epoch);
         assertEq(rcv.nextClaimEpoch(), rcv.lastClaimTimestamp() + epoch);
         uint256 claimed = claimEOA();
-        assertApproxEqAbs(claimed, rcv.dripRate() * epoch, 500000);
-        assertEq(claimed, rcv.currentEpochBalance());
+        assertApproxEqAbs(claimed, rate * epoch, 500000);
+        assertEq(claimed, epochBal);
+        assertEq(rcv.currentEpochBalance(), 0);
         assertEq(rcv.dripRate(), rate);
         assertEq(rcv.nextClaimEpoch(), block.timestamp);
     }
@@ -259,11 +266,13 @@ contract InterestReceiverTest is SetupTest {
         skipFirstEpoch();
         skipTime(epoch + 1);
         uint256 rate = rcv.dripRate();
-        assertEq(rate, rcv.currentEpochBalance() / epoch);
+        uint256 epochBal = rcv.currentEpochBalance();
+        assertEq(rate, epochBal / epoch);
         assertEq(rcv.nextClaimEpoch(), rcv.lastClaimTimestamp() + epoch);
         uint256 claimed = claimEOA();
-        assertEq(claimed, rcv.currentEpochBalance());
+        assertEq(claimed, epochBal);
         assertEq(rcv.dripRate(), 0);
+        assertEq(rcv.currentEpochBalance(), 0);
         assertEq(rcv.nextClaimEpoch(), block.timestamp - 1);
     }
 
@@ -275,11 +284,13 @@ contract InterestReceiverTest is SetupTest {
         donateReceiverEURe();
         skipTime(epoch / 2);
         uint256 rate = rcv.dripRate();
-        assertEq(rate, rcv.currentEpochBalance() / epoch);
+        uint256 epochBal = rcv.currentEpochBalance();
+        assertEq(rate, epochBal / epoch);
         assertEq(rcv.nextClaimEpoch(), rcv.lastClaimTimestamp() + epoch);
         uint256 claimed = claimEOA();
-        assertApproxEqAbs(claimed, rcv.dripRate() * epoch, 500000);
-        assertEq(claimed, rcv.currentEpochBalance());
+        assertApproxEqAbs(claimed, rate * epoch, 500000);
+        assertEq(claimed, epochBal);
+        assertEq(rcv.currentEpochBalance(), 0);
         assertEq(rcv.dripRate(), rate);
         assertEq(rcv.nextClaimEpoch(), block.timestamp);
     }
@@ -331,9 +342,21 @@ contract InterestReceiverTest is SetupTest {
         // Skip into new epoch so yield gets incorporated
         skipTime(epoch + 1);
 
-        // User interaction triggers claim
+        // First interaction after drain sets up new epoch (claims 0, but configures dripRate)
         vm.startPrank(bob, bob);
-        eure.approve(address(adapter), 1e18);
+        eure.approve(address(adapter), 2e18);
+        adapter.deposit(1e18, bob);
+        vm.stopPrank();
+
+        // dripRate should now be set for the new epoch
+        assertGt(rcv.dripRate(), 0);
+        assertEq(rcv.currentEpochBalance(), 5000e18);
+
+        // Skip some time so yield drips
+        skipTime(1 hours);
+
+        // Second interaction triggers actual yield drip to vault
+        vm.startPrank(bob, bob);
         adapter.deposit(1e18, bob);
         vm.stopPrank();
 
