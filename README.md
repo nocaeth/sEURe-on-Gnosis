@@ -1,66 +1,33 @@
-## Foundry
+# sEURe — Savings EURe on Gnosis
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+ERC4626 yield-bearing vault for [Monerium EURe](https://monerium.com/) on Gnosis Chain. Adapted from [sDAI-on-Gnosis](https://github.com/gnosischain/sDAI-on-Gnosis).
 
-Foundry consists of:
+Users deposit EURe and receive sEURe shares. A Monerium-funded bot periodically deposits yield into the InterestReceiver, which drips it to the vault over 3-day epochs to prevent flashloan exploitation.
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+## Contracts
 
-## Documentation
+| Contract | Description |
+|----------|-------------|
+| `SavingsEURe` | ERC4626 vault with EIP-2612 permit (EOA + ERC-1271 multisig) |
+| `InterestReceiver` | Epoch-based yield drip mechanism. Receives EURe from bot, releases to vault over time |
+| `SavingsEUReAdapter` | User-facing proxy that auto-claims pending yield on every deposit/withdraw |
 
-https://book.getfoundry.sh/
+## Build & Test
 
-## Usage
-
-### Build
-
-```shell
-$ forge build
+```
+forge build
+forge test
 ```
 
-### Test
+## Deploy
 
-```shell
-$ forge test
+```
+# Set env vars: MNEMONIC or PRIVATE_KEY, RPC_GNOSIS
+make deploy-gnosis
 ```
 
-### Format
+Post-deployment: fund InterestReceiver with >= 10,000 EURe, then call `initialize()`.
 
-```shell
-$ forge fmt
-```
+## Changes from sDAI
 
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+See [CHANGES-FROM-SDAI.md](CHANGES-FROM-SDAI.md) for a full breakdown of modifications, bug fixes, and security hardening applied vs the deployed sDAI contracts.
