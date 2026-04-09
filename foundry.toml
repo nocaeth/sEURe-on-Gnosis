@@ -1,0 +1,17 @@
+[profile.default]
+src = 'src'
+test = 'test'
+script = 'script'
+out = 'out'
+libs = ['lib']
+remappings = []
+
+[rpc_endpoints]
+gnosis = "${RPC_GNOSIS}"
+chiado = "${RPC_CHIADO}"
+
+[etherscan]
+#gnosis={key="${ETHERSCAN_API_KEY_GNOSIS}",chainId=100}
+
+[fuzz]
+runs=2000
