@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {console} from "forge-std/console.sol";
 import {InterestReceiver} from "src/InterestReceiver.sol";
 import {SetupTest} from "./Setup.t.sol";
+import {MockEURe} from "./Mocks/MockEURe.sol";
 
 contract InterestReceiverTest is SetupTest {
     event Initialized(uint256 indexed initialBalance, uint256 dripRate, uint256 nextClaimEpoch);
@@ -84,6 +85,32 @@ contract InterestReceiverTest is SetupTest {
         skipTime(1 hours);
         vm.expectRevert(bytes4(keccak256("NotValidClaimer()")));
         rcv.claim();
+    }
+
+    function testClaim_transferRevertRollsBackEpochState() public {
+        setClaimerAndInitialize();
+        skipTime(1 hours);
+
+        uint256 beforeCurrentEpochBalance = rcv.currentEpochBalance();
+        uint256 beforeDripRate = rcv.dripRate();
+        uint256 beforeNextClaimEpoch = rcv.nextClaimEpoch();
+        uint256 beforeLastClaimTimestamp = rcv.lastClaimTimestamp();
+        uint256 beforeReceiverBalance = eure.balanceOf(address(rcv));
+        uint256 beforeVaultBalance = eure.balanceOf(address(sEURe));
+
+        MockEURe(address(eure)).setRevertingSender(address(rcv), true);
+
+        vm.startPrank(bob, bob);
+        vm.expectRevert();
+        rcv.claim();
+        vm.stopPrank();
+
+        assertEq(rcv.currentEpochBalance(), beforeCurrentEpochBalance);
+        assertEq(rcv.dripRate(), beforeDripRate);
+        assertEq(rcv.nextClaimEpoch(), beforeNextClaimEpoch);
+        assertEq(rcv.lastClaimTimestamp(), beforeLastClaimTimestamp);
+        assertEq(eure.balanceOf(address(rcv)), beforeReceiverBalance);
+        assertEq(eure.balanceOf(address(sEURe)), beforeVaultBalance);
     }
 
     function testClaim() public {
@@ -428,6 +455,42 @@ contract InterestReceiverTest is SetupTest {
         uint256 drip = rcv.dripRate();
         uint256 expected = (1 ether * (drip * 365 days)) / deposits;
         assertEq(rcv.vaultAPY(), expected);
+    }
+
+    function testVaultAPY_receiverDonationOnlyAffectsNextEpochAndAccruesToHolders() public {
+        setClaimerAndInitialize();
+
+        vm.startPrank(alice);
+        eure.approve(address(sEURe), 10e18);
+        sEURe.deposit(10e18, alice);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        eure.approve(address(sEURe), 10e18);
+        sEURe.deposit(10e18, bob);
+        vm.stopPrank();
+
+        uint256 aliceShares = sEURe.balanceOf(alice);
+        uint256 bobShares = sEURe.balanceOf(bob);
+        uint256 aliceAssetsBefore = sEURe.previewRedeem(aliceShares);
+        uint256 bobAssetsBefore = sEURe.previewRedeem(bobShares);
+        uint256 apyBeforeDonation = rcv.vaultAPY();
+
+        vm.startPrank(bob);
+        eure.transfer(address(rcv), 3000e18);
+        vm.stopPrank();
+
+        assertEq(rcv.vaultAPY(), apyBeforeDonation);
+
+        teleport(rcv.nextClaimEpoch() + 1);
+        claimEoa();
+
+        assertGt(rcv.vaultAPY(), 0);
+        assertEq(rcv.currentEpochBalance(), 3000e18);
+        assertGt(sEURe.previewRedeem(aliceShares), aliceAssetsBefore);
+        assertGt(sEURe.previewRedeem(bobShares), bobAssetsBefore);
+        assertEq(sEURe.balanceOf(alice), aliceShares);
+        assertEq(sEURe.balanceOf(bob), bobShares);
     }
 
     function testClaim_sameBlockSecondCallReturnsZero() public {

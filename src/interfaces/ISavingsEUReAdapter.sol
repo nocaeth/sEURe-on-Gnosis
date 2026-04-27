@@ -8,6 +8,10 @@ import {ISavingsEURe} from "./ISavingsEURe.sol";
 /// @title ISavingsEUReAdapter
 /// @notice Adapter that wraps SavingsEURe ERC4626 interactions with opportunistic interest claims.
 interface ISavingsEUReAdapter {
+    /// @notice Emitted when the opportunistic claim hook catches a failed claim.
+    /// @param reason Raw revert data returned by `interestReceiver.claim()`.
+    event ClaimFailed(bytes reason);
+
     /// @notice Deposits EURe into SavingsEURe and mints shares to `receiver`.
     /// @param assets Amount of EURe assets to deposit.
     /// @param receiver Address receiving minted SavingsEURe shares.

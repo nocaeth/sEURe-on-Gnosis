@@ -33,7 +33,10 @@ contract SavingsEUReAdapter is ISavingsEUReAdapter {
 
     function _claimHook() internal {
         if (msg.sender == tx.origin) {
-            try interestReceiver.claim() {} catch {}
+            try interestReceiver.claim() {}
+            catch (bytes memory reason) {
+                emit ClaimFailed(reason);
+            }
         }
     }
 

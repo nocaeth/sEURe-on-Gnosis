@@ -173,6 +173,29 @@ contract SavingsEUReTest is SetupTest {
         vm.stopPrank();
     }
 
+    function testZeroSupplyResidualAssetsAreDilutedByVirtualOffset() public {
+        uint256 residual = 1e18;
+        uint256 depositAssets = 1e18;
+
+        deal(address(eure), address(sEURe), residual);
+        assertEq(sEURe.totalSupply(), 0);
+        assertEq(sEURe.totalAssets(), residual);
+
+        uint256 previewedShares = sEURe.previewDeposit(depositAssets);
+        assertGt(previewedShares, 0);
+        assertLt(previewedShares, depositAssets * 10 ** sEURe.decimals() / 1e18);
+
+        vm.startPrank(bob);
+        eure.approve(address(sEURe), depositAssets);
+        uint256 shares = sEURe.deposit(depositAssets, bob);
+        vm.stopPrank();
+
+        uint256 immediateRedeemable = sEURe.previewRedeem(shares);
+        assertEq(shares, previewedShares);
+        assertLe(immediateRedeemable, depositAssets);
+        assertLt(immediateRedeemable, residual + depositAssets);
+    }
+
     // checks that all deposit functions from deposit and mint return the same shares given equivalent inputs.
     function test_CompareAllTypes_Deposits() public {
         uint256 assets = 1e18;

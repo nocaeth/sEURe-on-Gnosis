@@ -56,7 +56,9 @@ interface IInterestReceiver {
 
     /// @notice Returns the instantaneous vault APY implied by the current drip rate.
     /// @dev This is not a trailing realized APY. It returns 0 before initialization, when no yield is dripping,
-    /// or when the vault has no assets.
+    /// or when the vault has no assets. Because rollover accounting uses the receiver's live EURe balance,
+    /// direct EURe transfers to this receiver can affect future `dripRate` values and this APY after rollover.
+    /// Integrators MUST NOT use this value as an oracle or risk input without independent validation.
     /// @return apy Annualized EURe drip divided by vault assets, scaled by 1e18.
     function vaultAPY() external view returns (uint256);
 

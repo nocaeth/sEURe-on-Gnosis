@@ -3,9 +3,20 @@ pragma solidity ^0.8.20;
 
 import {console} from "forge-std/console.sol";
 import {SetupTest} from "./Setup.t.sol";
+import {MockEURe} from "./Mocks/MockEURe.sol";
+import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
+import {ISavingsEUReAdapter} from "src/interfaces/ISavingsEUReAdapter.sol";
+
+contract AdapterCaller {
+    function deposit(address adapter, address eure, uint256 assets, address receiver) external returns (uint256) {
+        IERC20(eure).approve(adapter, assets);
+        return ISavingsEUReAdapter(adapter).deposit(assets, receiver);
+    }
+}
 
 contract SavingsEUReAdapterTest is SetupTest {
     event Transfer(address indexed from, address indexed to, uint256 value);
+    event ClaimFailed(bytes reason);
 
     function testMetadata() public view {
         assertEq(address(rcv), address(rcv));
@@ -294,5 +305,52 @@ contract SavingsEUReAdapterTest is SetupTest {
         adapter.deposit(1e18, alice);
         vm.stopPrank();
         assertEq(rcvBefore - eure.balanceOf(address(rcv)), expectedClaim);
+    }
+
+    function testDeposit_ContractCallerSkipsClaimHook() public {
+        setClaimerAndInitialize();
+        skipTime(1 hours);
+
+        AdapterCaller caller = new AdapterCaller();
+        deal(address(eure), address(caller), 1e18);
+
+        uint256 rcvBefore = eure.balanceOf(address(rcv));
+        uint256 shares = caller.deposit(address(adapter), address(eure), 1e18, bob);
+
+        assertGt(shares, 0);
+        assertEq(sEURe.balanceOf(bob), shares);
+        assertEq(eure.balanceOf(address(rcv)), rcvBefore);
+    }
+
+    function testDeposit_claimRevertLeavesReceiverStateUnchangedAndDeposits() public {
+        setClaimerAndInitialize();
+        skipTime(1 hours);
+
+        uint256 beforeCurrentEpochBalance = rcv.currentEpochBalance();
+        uint256 beforeDripRate = rcv.dripRate();
+        uint256 beforeNextClaimEpoch = rcv.nextClaimEpoch();
+        uint256 beforeLastClaimTimestamp = rcv.lastClaimTimestamp();
+        uint256 beforeReceiverBalance = eure.balanceOf(address(rcv));
+        uint256 beforeVaultBalance = eure.balanceOf(address(sEURe));
+        uint256 beforeAliceBalance = eure.balanceOf(alice);
+
+        MockEURe(address(eure)).setRevertingSender(address(rcv), true);
+
+        vm.startPrank(alice, alice);
+        eure.approve(address(adapter), 1e18);
+        vm.expectEmit(false, false, false, false, address(adapter));
+        emit ClaimFailed("");
+        uint256 shares = adapter.deposit(1e18, alice);
+        vm.stopPrank();
+
+        assertGt(shares, 0);
+        assertEq(sEURe.balanceOf(alice), shares);
+        assertEq(eure.balanceOf(alice), beforeAliceBalance - 1e18);
+        assertEq(eure.balanceOf(address(sEURe)), beforeVaultBalance + 1e18);
+        assertEq(rcv.currentEpochBalance(), beforeCurrentEpochBalance);
+        assertEq(rcv.dripRate(), beforeDripRate);
+        assertEq(rcv.nextClaimEpoch(), beforeNextClaimEpoch);
+        assertEq(rcv.lastClaimTimestamp(), beforeLastClaimTimestamp);
+        assertEq(eure.balanceOf(address(rcv)), beforeReceiverBalance);
     }
 }

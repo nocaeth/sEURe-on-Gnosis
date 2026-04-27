@@ -1,170 +1,260 @@
-# sEURe Savings Vault — Security Audit Report
+# Security Audit Report — sEURe-on-Gnosis
 
-**Project**: sEURe-on-Gnosis
 **Date**: 2026-04-27
-**Auditor**: Plamen v1.0.5 (Thorough mode)
-**Mode**: Thorough — iterative depth, PoC verification, all severities
-**Scope**: Full project (6 Solidity files, ~505 lines)
-**Fork ancestry**: sDAI-on-Gnosis (3 bug fixes + 10 security improvements applied)
+**Auditor**: Automated Security Analysis (Plamen v1.1.8, Thorough mode), merged with Plamen v1.0.5 baseline notes
+**Scope**: 3 in-scope contracts (SavingsEURe, InterestReceiver, SavingsEUReAdapter) + 3 interfaces
+**Language/Version**: Solidity ^0.8.20, Foundry
+**Build Status**: Compiled successfully
+**Static Analysis Status**: Slither — available, findings reviewed
+**Fork ancestry**: sDAI-on-Gnosis
 
 ---
 
 ## Executive Summary
 
-The sEURe savings vault is a well-designed fork of the audited sDAI-on-Gnosis protocol, adapted for Monerium's EURe stablecoin on Gnosis Chain. The codebase benefits from documented bug fixes and security hardening applied during the fork. The architecture is simple and conservative — an ERC4626 vault with epoch-based yield dripping, an adapter for opportunistic claiming, and no external DeFi dependencies.
+sEURe is an ERC-4626 vault for EURe on Gnosis Chain, depositing user EURe for sEURe shares that appreciate through epoch-based yield dripping. The protocol is minimal by design — no admin, no pause, no oracle, no external integrations beyond the EURe token. The only privileged role (claimer) has extremely limited scope.
 
-**One LOW-severity finding was confirmed with an executed PoC and mitigated**: a potential claim failure in the InterestReceiver if the EURe token balance decreases through non-protocol mechanisms (e.g., Monerium exercising balance reduction capabilities). The fix caps computed claims to the receiver's live EURe balance before transfer and rollover accounting.
+The remediation review invalidated the Medium impact originally assigned to the state-before-transfer pattern: if `eure.safeTransfer()` reverts, the full `claim()` call reverts and prior epoch-state writes roll back. The remaining actionable code issue was adapter observability when opportunistic claims fail; this has been remediated with `ClaimFailed(bytes reason)`. The remaining Low findings are accepted economic or operational tradeoffs documented for integrators.
 
-All other observations are informational — documented design choices or expected behaviors.
-
-**Overall assessment**: The codebase is well-structured, well-tested (85 tests, 100% pass rate including 8 fuzz tests), and incorporates lessons learned from the sDAI deployment.
+No Critical or High severity issues were found. The protocol benefits from a clean design with minimal attack surface, comprehensive test coverage, and OpenZeppelin v5.3's built-in protections.
 
 ---
 
-## Findings Summary
+## Summary
 
-| # | ID | Severity | Title | Location | Status |
-|---|----|----------|-------|----------|--------|
-| 1 | TR-1 | LOW | _calculateClaim claim failure if EURe balance reduced externally | InterestReceiver.sol:124 | Mitigated |
-| 2 | SR-1 | INFO | tx.origin-based EOA detection allows any EOA to claim | InterestReceiver.sol:59-60 | By Design |
-| 3 | SR-2 | INFO | One-step claimer transfer — no confirmation step | InterestReceiver.sol:153-161 | Documented Risk |
-| 4 | TF-1 | INFO | EURe donation to receiver manipulates epoch parameters | InterestReceiver.sol:138 | Expected |
-| 5 | SC-1 | INFO | No emergency pause mechanism | All contracts | Design Choice |
-| 6 | EP-1 | INFO | Unlimited EURe approval to vault in adapter | SavingsEUReAdapter.sol:25 | Standard Pattern |
-| 7 | SV-1 | INFO | Permit implementation verified correct | SavingsEURe.sol:30-56 | Verified |
+| Severity | Count |
+|----------|-------|
+| Critical | 0 |
+| High | 0 |
+| Medium | 0 |
+| Low | 4 |
+| Informational | 2 |
+
+### Components Audited
+
+| Component | Path | Lines | Description |
+|----------|------|-------|-------------|
+| SavingsEURe | `src/SavingsEURe.sol` | 68 | ERC-4626 vault wrapping EURe with permit support |
+| InterestReceiver | `src/InterestReceiver.sol` | 166 | Epoch-based EURe yield drip into the vault |
+| SavingsEUReAdapter | `src/periphery/SavingsEUReAdapter.sol` | 78 | User-facing adapter bundling vault ops with claims |
+| ISavingsEURe | `src/interfaces/ISavingsEURe.sol` | 49 | Vault interface with permit |
+| IInterestReceiver | `src/interfaces/IInterestReceiver.sol` | 96 | Drip interface |
+| ISavingsEUReAdapter | `src/interfaces/ISavingsEUReAdapter.sol` | 52 | Adapter interface |
 
 ---
 
-## Findings Detail
+## Reclassified Findings
 
-### [TR-1] LOW — _calculateClaim Claim Failure If EURe Balance Reduced Externally
+### [M-01] Claim State Committed Before EURe Transfer [RECLASSIFIED]
 
-**Location**: `InterestReceiver.sol:124`
-**Severity**: LOW
-**Status**: Mitigated with regression tests
-**Assumption Dependency**: `[ASSUMPTION-DEP: TRUSTED-ACTOR]` — requires EURe issuer (Monerium) to have balance reduction capability
+**Severity**: Informational / invalidated impact
+**Location**: `InterestReceiver.sol:88-93`, `SavingsEUReAdapter.sol:36-37`
+**Status**: Regression-tested; no production code change required in `InterestReceiver.claim()`
 
-#### Description
+**Description**:
 
-The `_calculateClaim` function computes `remaining = balance - claimable` during epoch rollover. The `balance` value is a fresh `eure.balanceOf(address(this))` reading, while `claimable` is derived from `currentEpochBalance` — a state variable set at epoch start.
+`InterestReceiver.claim()` writes four storage variables (`currentEpochBalance`, `dripRate`, `nextClaimEpoch`, `lastClaimTimestamp`) before executing `eure.safeTransfer()`. The original report treated those writes as permanently committed if the transfer reverts.
 
-If the actual EURe balance of the receiver decreases below the computed `claimable` amount between epoch start and a later claim (e.g., through Monerium exercising a burn or seizure mechanism on the receiver address), claims can fail. At rollover this caused an arithmetic underflow in `balance - claimable`; mid-epoch it could also make `safeTransfer(claimed)` revert because the receiver no longer held enough EURe.
-
-#### Impact
-
-- **Direct**: Subsequent `claim()` calls could revert while live balance remained below computed claimable amount
-- **Yield distribution**: Could halt until receiver balance was replenished above the computed claimable amount
-- **User operations**: Unaffected — adapter's try/catch gracefully absorbs the revert
-- **Funds at risk**: EURe held by receiver could be temporarily stranded from direct claiming
-
-#### PoC
+That impact is not reproducible under EVM revert semantics. If `eure.safeTransfer()` reverts, the entire `claim()` call reverts and all prior writes from that call roll back. The adapter `try/catch` catches the failed external call at the caller boundary, but it does not preserve partial callee state.
 
 ```solidity
-// test/PoC_TR1.t.sol — test_TR1_balanceReductionCapsEpochRolloverClaim
-// 1. Initialize receiver with 10001 EURe
-// 2. Skip past epoch end
-// 3. Reduce receiver balance to currentEpochBalance / 2
-// 4. claim() succeeds and transfers only the available receiver balance
+// InterestReceiver.sol:88-93 — state before transfer
+currentEpochBalance = nextEpochBalance;
+dripRate = nextDripRate;
+nextClaimEpoch = nextEpochTimestamp;
+lastClaimTimestamp = block.timestamp;
+
+eure.safeTransfer(address(sEURe), claimed);  // if this reverts, state above rolls back
 ```
 
-Five PoC/regression tests all pass:
-- `test_TR1_balanceReductionCapsEpochRolloverClaim` — confirms rollover claims are capped to live balance
-- `test_TR1_balanceReductionCapsMidEpochClaim` — confirms mid-epoch claims are capped before transfer
-- `test_TR1_noUnderflowWhenBalanceSufficient` — confirms normal operation
-- `test_TR1_adapterDepositGraceful` — confirms adapter continues working
-- `test_edge_epochBoundaryExactTimestamp` — confirms epoch boundary correctness
+```solidity
+// SavingsEUReAdapter.sol — remediated observability
+try interestReceiver.claim() {}
+catch (bytes memory reason) {
+    emit ClaimFailed(reason);
+}
+```
 
-#### Resolution
+**Impact**:
 
-`InterestReceiver._calculateClaim` now caps `claimable` to the receiver's live EURe balance before transfer and before rollover accounting:
+The permanent-loss impact is invalid. The real impact was operational observability: adapter-triggered user operations could continue after a failed opportunistic claim without an on-chain signal. This is covered by L-04 and remediated with `ClaimFailed(bytes reason)`.
+
+**Regression coverage**:
+
+- `testClaim_transferRevertRollsBackEpochState`
+- `testDeposit_claimRevertLeavesReceiverStateUnchangedAndDeposits`
+
+**Recommendation**:
+
+No `InterestReceiver` state ordering change is required. Keep the current checks-effects-interactions ordering and retain the regression tests to prevent the false-positive impact from returning to the report.
+
+---
+
+## Low Findings
+
+### [L-01] Donation-Enabled MEV and APY Manipulation [VERIFIED]
+
+**Severity**: Low
+**Location**: `InterestReceiver.sol:128-136`, `InterestReceiver.sol:141-143`
+**Confidence**: HIGH (3 agents confirmed, Static Analysis: Y, PoC: PASS)
+
+**Description**:
+
+`InterestReceiver._balance()` reads `eure.balanceOf(address(this))` directly. Any address can transfer EURe to the receiver, and at epoch rollover, `remaining = balance - claimable` is used as the next epoch's parameters. This inflates `dripRate` and `currentEpochBalance` for the next epoch.
+
+Additionally, `vaultAPY()` computes `1e18 * (dripRate * 365 days) / totalAssets`. An inflated `dripRate` produces an artificially high APY.
+
+Between claims, yield accumulates in the receiver but is not reflected in the share price (`totalAssets` only counts vault balance). A user who deposits right before a `claim()` gets shares at the stale lower price, capturing disproportionate yield.
+
+**Impact**:
+
+All sEURe holders benefit proportionally from donations — no direct value extraction. However, `vaultAPY()` can be manipulated to mislead downstream DeFi integrations. The MEV vector allows front-running claims to capture yield that should be pro-rata.
+
+**Recommendation**:
+
+Document the behavior rather than changing accounting. Direct receiver funding is part of the yield model, and switching to internal accounting would require a new funding notification flow. `vaultAPY()` NatSpec now warns integrators that it is an instantaneous display metric, not an oracle or risk input. Regression coverage: `testVaultAPY_receiverDonationOnlyAffectsNextEpochAndAccruesToHolders`.
+
+---
+
+### [L-02] Single-Step Claimer Transfer with No Delay [VERIFIED]
+
+**Severity**: Low
+**Location**: `InterestReceiver.sol:157-165`
+**Confidence**: HIGH (1 agent confirmed, PoC: PASS)
+
+**Description**:
+
+`setClaimer()` transfers the claimer role in one step with no timelock, no two-step handoff, and no delay. A compromised claimer key can instantly transfer the role to any address (excluding zero address).
+
+**Impact**:
+
+The claimer role is extremely limited — it can only call `claim()` and `setClaimer()`. No user funds are at risk. The maximum damage from a compromised key is strategic claim timing (already covered in L-01) or transferring the role to an inactive address. EOAs can always call `claim()` directly, providing a decentralized fallback.
+
+**Recommendation**:
+
+Accepted as an intentional one-step handoff. The adapter contract cannot accept a two-step role transfer, the role cannot move funds, and EOAs can always call `claim()` directly. Operational guidance is documented in `README.md`.
+
+---
+
+### [L-03] Return-to-Zero Residual Yield Capture [VERIFIED]
+
+**Severity**: Low
+**Location**: `SavingsEURe.sol:24-26`
+**Confidence**: MEDIUM (1 agent confirmed, PoC: PASS)
+
+**Description**:
+
+If all users exit the vault (`totalSupply -> 0`) while yield continues to drip from InterestReceiver, residual EURe accumulates in the vault. The first new depositor captures this residual yield through share calculation. With `_decimalsOffset() = 3` providing 1000 virtual shares, the capture is bounded by the virtual offset.
+
+**Impact**:
+
+At normal TVL, the impact is negligible. Only exploitable if all users exit and significant residual yield remains.
+
+**Recommendation**:
+
+Document as expected ERC-4626 virtual-offset behavior rather than adding an admin or keeper sweep role. Regression coverage: `testZeroSupplyResidualAssetsAreDilutedByVirtualOffset`.
+
+---
+
+### [L-04] Adapter Silently Ignores Claim Failures [VERIFIED]
+
+**Severity**: Low
+**Location**: `SavingsEUReAdapter.sol:36-37`
+**Confidence**: HIGH (2 agents confirmed, PoC: PASS)
+**Status**: Remediated
+
+**Description**:
+
+The adapter's `_claimHook()` calls `interestReceiver.claim()` inside a `try/catch`. Before remediation, the catch path silently swallowed all failures. A failed `claim()` does not permanently commit receiver state, but without an event operators and indexers had no signal that opportunistic yield claiming was failing.
+
+**Impact**:
+
+Users' deposits and withdrawals succeed normally. The silent failure made it difficult for operators to detect when yield was not being claimed.
+
+**Recommendation**:
+
+Resolved by emitting the raw revert data in the catch block:
+
+```diff
+ function _claimHook() internal {
+     if (msg.sender == tx.origin) {
+-        try interestReceiver.claim() {} catch {}
++        try interestReceiver.claim() {}
++        catch (bytes memory reason) {
++            emit ClaimFailed(reason);
++        }
+     }
+ }
+```
+
+Regression coverage: `testDeposit_claimRevertLeavesReceiverStateUnchangedAndDeposits`.
+
+---
+
+## Informational Findings
+
+### [I-01] Contract Callers Cannot Trigger Claims
+
+**Severity**: Informational
+**Location**: `SavingsEUReAdapter.sol:35`
+
+**Description**:
+
+`_claimHook()` checks `msg.sender == tx.origin`, preventing contract callers from triggering claims through the adapter. This is documented as intentional ("only EOAs are able to claim interest") but limits DeFi composability for protocols that interact through the adapter.
+
+**Impact**: Contracts (aggregators, other DeFi protocols) using the adapter skip the claim step. Yield still accumulates in the receiver and can be claimed by EOAs or the designated claimer directly.
+
+**Recommendation**: Document this as a known limitation for integrators. Contract callers can use direct vault flows, rely on public EOA/keeper claims, or coordinate with the designated claimer path. Regression coverage: `testDeposit_ContractCallerSkipsClaimHook`.
+
+---
+
+### [I-02] Baseline TR-1 Balance Reduction Finding [MITIGATED]
+
+**Severity**: Informational after mitigation
+**Location**: `InterestReceiver.sol:123-128`
+
+The baseline audit identified a potential claim failure if EURe balance is externally reduced below computed claimable amount. Current code caps `claimable` to the receiver's live balance before transfer and before rollover accounting:
 
 ```solidity
 if (claimable > balance) {
     claimable = balance;
 }
-uint256 remaining = balance - claimable;
 ```
 
-This ensures the function degrades gracefully by claiming available balance rather than reverting. Regression coverage includes both the epoch rollover underflow path and the mid-epoch transfer-revert path.
-
-#### Likelihood Assessment
-
-- **EURe blocklisting**: Prevents transfers but does NOT reduce balanceOf → causes different failure mode (safeTransfer reverts, rolling back state correctly)
-- **EURe balance reduction**: Would require Monerium to exercise undocumented capabilities → LOW likelihood
-- **Worst-case severity without mitigation**: MEDIUM (permanent yield halt)
+Regression coverage includes `test_TR1_balanceReductionCapsEpochRolloverClaim`, `test_TR1_balanceReductionCapsMidEpochClaim`, `test_TR1_noUnderflowWhenBalanceSufficient`, `test_TR1_adapterDepositGraceful`, and `test_edge_epochBoundaryExactTimestamp`.
 
 ---
 
-### [SR-1] INFO — tx.origin-Based EOA Detection
+## Baseline Observations
 
-**Location**: `InterestReceiver.sol:59-60`
-
-The `isClaimer` modifier uses `tx.origin == msg.sender` to detect EOAs, allowing any EOA to call `claim()`. This is inherited from sDAI and documented as intentional — it prevents contract-based flash loan attacks on claim timing while allowing any EOA to trigger yield distribution. The `claimer` role is only meaningful for contract callers (the adapter).
-
----
-
-### [SR-2] INFO — One-Step Claimer Transfer
-
-**Location**: `InterestReceiver.sol:153-161`
-
-`setClaimer()` is one-step with no pending confirmation. A typo permanently locks the claimer role on an immutable contract. Mitigated by: (1) zero-address check, (2) only current claimer can call, (3) EOAs can still claim directly regardless. Documented as intentional — the adapter contract cannot accept a two-step handoff.
+- **tx.origin-based EOA detection**: Any EOA can call `claim()` by design; contract callers must be the configured `claimer`.
+- **No emergency pause mechanism**: The contracts are immutable and intentionally omit owner, pause, and upgrade paths.
+- **Unlimited EURe approval in adapter**: The adapter approves the immutable vault for `type(uint256).max`; the adapter should only hold EURe transiently.
+- **Permit implementation**: Uses OpenZeppelin `SignatureChecker`, `_hashTypedDataV4`, and `Nonces`; EOA and ERC-1271 paths are covered by tests.
 
 ---
 
-### [TF-1] INFO — EURe Donation Manipulates Epoch Parameters
+## Priority Remediation Order
 
-**Location**: `InterestReceiver.sol:138`
-
-`_balance()` uses `eure.balanceOf(address(this))` directly. EURe donations to the receiver affect epoch calculations. All donation vectors benefit all depositors equally (higher yield) — no profitable attack identified. The cost of attack equals the donated amount with no extraction mechanism.
-
----
-
-### [SC-1] INFO — No Emergency Pause Mechanism
-
-All three contracts are immutable with no Ownable, Pausable, or upgradeable patterns. If a vulnerability is discovered post-deployment, there is no way to halt operations. This is consistent with the project's immutable contract design philosophy.
+1. **M-01**: Reclassified; retain rollback regression tests.
+2. **L-04**: Add `ClaimFailed(bytes reason)` event to adapter catch block — completed.
+3. **L-01**: Document donation behavior and `vaultAPY()` limitations — completed.
+4. **L-02**: Document one-step claimer transfer as accepted design — completed.
+5. **L-03**: Document residual zero-supply behavior and retain quantification test — completed.
+6. **I-01**: Document EOA-only claim as integration constraint — completed.
 
 ---
 
-### [EP-1] INFO — Unlimited EURe Approval in Adapter
+## Appendix A: Internal Audit Traceability
 
-**Location**: `SavingsEUReAdapter.sol:25`
-
-`eure.approve(savingsEuRe_, type(uint256).max)` in the constructor. The adapter only holds EURe transiently during deposit operations — no persistent balance at risk. Standard pattern for ERC4626 adapters.
-
----
-
-### [SV-1] INFO — Permit Implementation Verified Correct
-
-**Location**: `SavingsEURe.sol:30-56`
-
-The permit implementation uses OpenZeppelin's `SignatureChecker.isValidSignatureNow` (supports both EOA ECDSA and ERC1271 contract wallets), `_hashTypedDataV4` for EIP712 domain separation, `_useNonce` for replay protection, and properly validates deadline and zero-address owner. No malleability issues (high-s rejected by OZ ECDSA internally). No duplicate event emission (fixed from sDAI).
+| Report ID | Internal Hypothesis | Verification | Agent Sources |
+|-----------|-------------------|--------------|---------------|
+| M-01 | H-1 | RECLASSIFIED | Semi-Trusted Roles, Token Flow, Multi-Step Ops |
+| L-01 | H-2 | CONFIRMED | Token Flow, Economic Design, Semi-Trusted Roles |
+| L-02 | H-3 | CONFIRMED | Semi-Trusted Roles |
+| L-03 | H-5 | CONFIRMED | Zero State |
+| L-04 | H-1 (adapter) | CONFIRMED / REMEDIATED | Multi-Step Ops |
+| I-01 | H-4 | CONFIRMED | Multi-Step Ops |
+| I-02 | TR-1 | MITIGATED | Baseline audit, PoC_TR1 |
 
 ---
-
-## Codebase Quality Assessment
-
-| Metric | Assessment |
-|--------|-----------|
-| Test coverage | Excellent — 85 tests, 8 fuzz tests @ 10k runs, all edge cases covered |
-| Documentation | Excellent — NatSpec on all interfaces, CHANGES-FROM-SDAI.md documents every change |
-| Dependencies | Minimal — only OpenZeppelin v5.3.0 (tagged, audited) |
-| Architecture | Simple, conservative — no proxy, no upgrade, no external DeFi |
-| Static analysis | Clean — Slither finds 0 project-specific issues |
-| Fork provenance | Well-documented — 3 bug fixes + 10 security improvements from sDAI |
-
----
-
-## Known Accepted Risks (from CHANGES-FROM-SDAI.md)
-
-1. **EURe blocklist** — Monerium can freeze addresses, locking deposits. No code mitigation for immutable contracts.
-2. **Any EOA can claim** — Intentional. Prevents contract flash loan attacks while allowing broad yield distribution.
-3. **Epoch revival requires two claims** — After full drain, first claim sets up new epoch with 0 payout. Self-healing.
-4. **Contract wallets don't trigger claims** — Safe multisigs and ERC-4337 wallets excluded from adapter's auto-claim due to `tx.origin` check. Yield depends on EOA interactions or external keepers.
-
----
-
-## Artifacts
-
-All analysis artifacts are in `.plamen-scratchpad/`. The PoC test file is at `test/PoC_TR1.t.sol`.
-
-**This audit was performed in Thorough mode with iterative depth analysis and executed PoC verification.**
