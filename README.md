@@ -53,6 +53,11 @@ The script deploys `SavingsEURe` → `InterestReceiver` → `SavingsEUReAdapter`
 
 **After deploy:** `initialize()` may only be called by the **current** `claimer`. Right after `InterestReceiver` is created, that address is the **deployer**; once `setClaimer(adapter)` runs, only the adapter could satisfy that check, and the adapter does not forward `initialize()`. So you must **fund** `InterestReceiver` with at least **100 EURe** (`MIN_EPOCH_BALANCE`) and call **`initialize()` while `claimer` is still the deployer**—e.g. extend `SavingsEUReDeployer.s.sol` to transfer EURe in, call `initialize()`, then deploy the adapter and `setClaimer`, or use a separate broadcast before handing off `claimer`. Until initialized, `claim` is disabled.
 
+## Security
+
+- [Audit report](security/AUDIT_REPORT.md)
+- [X-ray / protocol review notes](security/x-ray/x-ray.md) (entry points, invariants, architecture diagram)
+
 ## Changes from sDAI
 
 See [CHANGES-FROM-SDAI.md](CHANGES-FROM-SDAI.md) for architecture differences, bug fixes, and hardening vs the deployed sDAI stack.
