@@ -16,6 +16,14 @@ Underlying EURe on Gnosis: `0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430`.
 
 Direct vault interaction remains possible; the adapter is the recommended path when you want claims bundled with user flows.
 
+## Security and Integration Notes
+
+- `InterestReceiver.vaultAPY()` is an instantaneous display metric, not an oracle. Direct EURe transfers to `InterestReceiver` are part of the funding model and can affect the next epoch's `dripRate` and reported APY after rollover.
+- The claimer role is intentionally narrow: it can call `claim()` as a contract and transfer the claimer role, but it cannot move vault funds or change vault parameters. Initialize the receiver before handing this role to the adapter, monitor `ClaimerUpdated`, and prefer multisig-controlled deployment operations.
+- If vault supply returns to zero while residual EURe remains in the vault, the next depositor can receive part of that residual through ERC-4626 share math. OpenZeppelin's virtual-share offset (`_decimalsOffset() = 3`) bounds this behavior, and no admin sweep role is included.
+- Adapter auto-claims are EOA-only (`msg.sender == tx.origin`). Contract callers can still use the adapter, but they skip the bundled claim and should rely on direct vault flows, public EOA/keeper claims, or the configured claimer path.
+- If an adapter auto-claim fails, the adapter emits `ClaimFailed(bytes reason)` and continues the user operation.
+
 ## Prerequisites
 
 - [Foundry](https://book.getfoundry.sh/) (`forge`, `cast`, …)
