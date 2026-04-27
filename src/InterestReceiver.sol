@@ -120,6 +120,10 @@ contract InterestReceiver is Initializable, IInterestReceiver {
             }
         }
 
+        if (claimable > balance) {
+            claimable = balance;
+        }
+
         if (block.timestamp > nextClaimEpoch) {
             uint256 remaining = balance - claimable;
             if (remaining < MIN_EPOCH_BALANCE) {

@@ -14,9 +14,9 @@ chiado = "${RPC_CHIADO}"
 #gnosis={key="${ETHERSCAN_API_KEY_GNOSIS}",chainId=100}
 
 [fuzz]
-runs=2000
+runs=10000
 
-# Public getters intentionally match interfaces (eure, sEURe, vaultAPY); scripts use deriveKey.
+# Public getters intentionally match interfaces (sEURe, vaultAPY); scripts use deriveKey.
 [lint]
 exclude_lints = [
     "screaming-snake-case-immutable",
