@@ -22,8 +22,7 @@ contract SavingsEUReDeployerTest is Test {
 
         vm.setEnv("MNEMONIC", "short");
         vm.setEnv(
-            "PRIVATE_KEY",
-            vm.toString(uint256(0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80))
+            "PRIVATE_KEY", vm.toString(uint256(0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80))
         );
         new SavingsEUReDeployer().run();
     }
