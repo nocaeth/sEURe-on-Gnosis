@@ -64,7 +64,7 @@ contract InterestReceiver is Initializable, IInterestReceiver {
     function initialize() public override initializer {
         if (msg.sender != claimer) revert NotClaimer();
         currentEpochBalance = _balance();
-        if (currentEpochBalance <= MIN_EPOCH_BALANCE) revert InsufficientInitialBalance();
+        if (currentEpochBalance < MIN_EPOCH_BALANCE) revert InsufficientInitialBalance();
         lastClaimTimestamp = block.timestamp;
         nextClaimEpoch = block.timestamp + epochLength;
         dripRate = currentEpochBalance / epochLength;

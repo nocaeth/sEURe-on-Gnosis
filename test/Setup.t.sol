@@ -59,7 +59,7 @@ contract SetupTest is Test {
 
     function testInitialize() public {
         vm.startPrank(initializer);
-        if (eure.balanceOf(address(rcv)) > rcv.MIN_EPOCH_BALANCE()) {
+        if (eure.balanceOf(address(rcv)) >= rcv.MIN_EPOCH_BALANCE()) {
             rcv.initialize();
         } else {
             vm.expectRevert(bytes4(keccak256("InsufficientInitialBalance()")));

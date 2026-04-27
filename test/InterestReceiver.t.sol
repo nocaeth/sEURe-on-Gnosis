@@ -40,7 +40,7 @@ contract InterestReceiverTest is SetupTest {
 
     function testInitialize_notEnoughBalance() external {
         vm.startPrank(initializer);
-        deal(address(eure), address(rcv), rcv.MIN_EPOCH_BALANCE());
+        deal(address(eure), address(rcv), rcv.MIN_EPOCH_BALANCE() - 1);
         vm.expectRevert(bytes4(keccak256("InsufficientInitialBalance()")));
         rcv.initialize();
     }
