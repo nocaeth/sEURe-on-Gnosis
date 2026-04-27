@@ -112,7 +112,7 @@ The default offset of 0 leaves the vault vulnerable to the first-depositor infla
 
 ### 5. `initialize()` restricted to claimer
 
-**Added `require(msg.sender == claimer, "Not Claimer")` to `initialize()`.**
+**Added a `NotClaimer()` check to `initialize()`.**
 
 In sDAI, `initialize()` is permissionless — anyone can call it once the balance threshold is met. A front-runner could initialize at a suboptimal moment, permanently locking in bad epoch parameters on an immutable contract. sEURe restricts this to the claimer (deployer, then adapter).
 
@@ -130,7 +130,7 @@ sDAI uses raw `wxdai.transferFrom()` — safe because WXDAI is a known-good cont
 
 ### 8. `setClaimer` zero-address check
 
-**Added `require(newClaimer != address(0), "Zero address")`.**
+**Added a `ZeroAddress()` check.**
 
 sDAI allows setting claimer to `address(0)`, permanently bricking the claimer role. While any EOA can still call `claim()` directly, the adapter would lose its special claimer status. On an immutable contract, this is unrecoverable.
 
@@ -140,30 +140,67 @@ sDAI allows setting claimer to `address(0)`, permanently bricking the claimer ro
 
 sDAI's interface declares `claim()` with no return value, but the implementation returns `uint256`. The mismatch prevents external integrators from reading the claimed amount through the interface.
 
+### 10. Permit signature validation upgraded to OpenZeppelin helpers
+
+**Replaced custom `ecrecover` / ERC-1271 handling with `SignatureChecker.isValidSignatureNow`.**
+
+sEURe originally carried custom permit verification logic so EOAs and contract wallets could both approve by signature. That logic accepted high-`s` malleable ECDSA signatures and duplicated behavior already provided by OpenZeppelin. The current implementation delegates signature validation to `SignatureChecker`, preserving ERC-1271 support while using OpenZeppelin's canonical ECDSA checks.
+
+### 11. Permit domain separator uses OpenZeppelin EIP-712 path
+
+**Removed the custom cached domain separator and now hashes permits with `_hashTypedDataV4`.**
+
+The previous implementation maintained a second domain-separator cache alongside OpenZeppelin's `EIP712` cache. Both produced the same value, but duplicating this logic made future drift possible. sEURe now uses OpenZeppelin's fork-aware `_domainSeparatorV4()` path through `_hashTypedDataV4`.
+
+### 12. Duplicate `Approval` event removed from `permit()`
+
+**Removed manual `emit Approval(...)` after `_approve`.**
+
+OpenZeppelin Contracts v5 `_approve(owner, spender, value)` already emits `Approval`. The extra manual emit caused each successful permit to produce two identical approval logs. sEURe now emits the standard single event.
+
+### 13. InterestReceiver custom errors
+
+**Replaced string reverts with custom errors.**
+
+The receiver now uses `NotInitialized`, `NotClaimer`, `NotValidClaimer`, `InsufficientInitialBalance`, and `ZeroAddress`. This reduces bytecode/revert overhead and makes test and integration expectations more precise.
+
+### 14. InterestReceiver operational events
+
+**Added `Initialized` and `ClaimerUpdated` events.**
+
+The receiver already emitted `Claimed`; initialization and claimer updates are now also visible to indexers, dashboards, and deployment checks.
+
+### 15. InterestReceiver NatSpec and explicit policy constants
+
+**Documented the receiver, interface, public state, role model, APY semantics, and thresholds.**
+
+The previously inline balance threshold is now the named constant `MIN_EPOCH_BALANCE`, used both for initialization and epoch renewal. The one-step claimer handoff is intentionally preserved because the claimer is expected to become the adapter contract, which cannot accept a two-step handoff.
+
 ---
 
 ## Simplification & Gas Optimization
 
-### 10. `epochLength` changed to `constant`
+### 16. `epochLength` changed to `constant`
 
 sDAI declares `epochLength` as a storage variable (costs ~2100 gas cold SLOAD per read). It has no setter and never changes. sEURe declares it `constant`, eliminating the storage slot entirely.
 
-### 11. Removed duplicate `vault` variable
+### 17. Removed duplicate `vault` variable
 
 sDAI's `BridgeInterestReceiver` stores both `address public vault` and `SavingsXDai private sDAI` pointing to the same contract. sEURe uses a single `SavingsEURe public immutable sEURe` and references `address(sEURe)` where needed.
 
-### 12. Removed unused imports
+### 18. Removed unused imports and custom signature plumbing
 
 - `IERC4626` import in InterestReceiver (never referenced)
-- `ECDSA` import in SavingsEURe (never used — custom `ecrecover` is used instead)
+- Custom `IERC1271` interface in SavingsEURe (replaced by OpenZeppelin `SignatureChecker`)
+- Custom domain-separator state in SavingsEURe (replaced by OpenZeppelin `EIP712`)
 
-### 13. Renamed `_aggregateBalance()` to `_balance()`
+### 19. Renamed `_aggregateBalance()` to `_balance()`
 
 The original name implied aggregation across multiple balance sources (native xDAI + WXDAI). In sEURe it's a single `eure.balanceOf()` call. Renamed for clarity.
 
-### 14. Cached `balance - claimable` in `_calcClaimable()`
+### 20. Internal claim state math
 
-The expression was computed 3 times in the epoch renewal block. Now cached in a `remaining` local variable.
+`claim()` uses a single internal `_calculateClaim()` path to derive the claimed amount and next epoch state. The external `previewClaimable()` view was removed to keep the receiver interface focused on the mutation path used by EOAs, the adapter, and keepers.
 
 ---
 
@@ -171,10 +208,10 @@ The expression was computed 3 times in the epoch renewal block. Now cached in a 
 
 | Parameter | sDAI | sEURe | Rationale |
 |-----------|------|-------|-----------|
-| Init minimum | 30,000 | 10,000 | Lower barrier for a new product to go live |
-| Epoch minimum | 1,000 | 1,000 | Kept — still reasonable for EURe |
-| Epoch length | 3 days | 3 days | Kept — battle-tested |
-| First epoch | 6 days | 6 days | Kept — conservative initial drip |
+| Init minimum | 30,000 | 100 | Lower barrier for a new product to go live |
+| Epoch minimum | 1,000 | 100 | Lower threshold for bot-funded EURe epochs |
+| Epoch length | 3 days | 5 days | Slower drip cadence for sEURe |
+| First epoch | 6 days | 5 days | No special bridge-integration lag; uses regular epoch length |
 
 ---
 
@@ -184,6 +221,8 @@ The expression was computed 3 times in the epoch renewal block. Now cached in a 
 |---------|------|-------|
 | OpenZeppelin | v5.x (untagged commit) | v5.3.0 (tagged, audited) |
 | forge-std | unknown (submodule not populated) | v1.15.0 |
+
+All in-repo Solidity files now use standard SPDX identifiers and `pragma solidity ^0.8.20`, matching the OpenZeppelin v5.3.0 dependency baseline.
 
 ---
 

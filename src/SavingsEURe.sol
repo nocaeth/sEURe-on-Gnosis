@@ -1,46 +1,25 @@
-// SPDX-License-Identifier: agpl-3
-pragma solidity ^0.8.19;
+// SPDX-License-Identifier: AGPL-3.0-only
+pragma solidity ^0.8.20;
 
-import "openzeppelin/token/ERC20/extensions/ERC4626.sol";
-import {IERC20Permit} from "openzeppelin/token/ERC20/extensions/IERC20Permit.sol";
+import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
+import {ERC20} from "openzeppelin/token/ERC20/ERC20.sol";
+import {ERC4626} from "openzeppelin/token/ERC20/extensions/ERC4626.sol";
+import {ISavingsEURe} from "./interfaces/ISavingsEURe.sol";
 import {EIP712} from "openzeppelin/utils/cryptography/EIP712.sol";
 import {Nonces} from "openzeppelin/utils/Nonces.sol";
+import {SignatureChecker} from "openzeppelin/utils/cryptography/SignatureChecker.sol";
 
-interface IERC1271 {
-    function isValidSignature(bytes32, bytes memory) external view returns (bytes4);
-}
-
-contract SavingsEURe is ERC4626, IERC20Permit, EIP712, Nonces {
-    IERC20 public immutable eure = IERC20(0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430);
-
+contract SavingsEURe is ERC4626, ISavingsEURe, EIP712, Nonces {
     // --- EIP712 niceties ---
-    uint256 public immutable deploymentChainId;
-    bytes32 private immutable _DOMAIN_SEPARATOR;
-    bytes32 public constant PERMIT_TYPEHASH =
+    /// @inheritdoc ISavingsEURe
+    bytes32 public constant override PERMIT_TYPEHASH =
         keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
-    string public constant VERSION = "1";
 
-    /**
-     * @dev Permit deadline has expired.
-     */
-    error ERC2612ExpiredSignature(uint256 deadline);
-
-    /**
-     * @dev Mismatched signature.
-     */
-    error ERC2612InvalidSigner(address signer, address owner);
-
-    /**
-     * @dev Set the underlying asset contract. This must be an ERC20-compatible contract (ERC20 or ERC777).
-     */
-    constructor(string memory _name, string memory _ticker)
-        ERC20(_name, _ticker)
-        ERC4626(IERC20(address(eure)))
-        EIP712(_name, "1")
-    {
-        deploymentChainId = block.chainid;
-        _DOMAIN_SEPARATOR = _calculateDomainSeparator(block.chainid);
-    }
+    constructor()
+        ERC20("Savings EURe", "sEURe")
+        ERC4626(IERC20(0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430))
+        EIP712("Savings EURe", "1")
+    {}
 
     function _decimalsOffset() internal pure override returns (uint8) {
         return 3;
@@ -49,75 +28,41 @@ contract SavingsEURe is ERC4626, IERC20Permit, EIP712, Nonces {
     // --- Approve by signature ---
 
     function _isValidSignature(address signer, bytes32 digest, bytes memory signature) internal view returns (bool) {
-        if (signature.length == 65) {
-            bytes32 r;
-            bytes32 s;
-            uint8 v;
-            assembly {
-                r := mload(add(signature, 0x20))
-                s := mload(add(signature, 0x40))
-                v := byte(0, mload(add(signature, 0x60)))
-            }
-            if (signer == ecrecover(digest, v, r, s)) {
-                return true;
-            }
-        }
-
-        (bool success, bytes memory result) =
-            signer.staticcall(abi.encodeWithSelector(IERC1271.isValidSignature.selector, digest, signature));
-        return (success && result.length == 32 && abi.decode(result, (bytes4)) == IERC1271.isValidSignature.selector);
+        return SignatureChecker.isValidSignatureNow(signer, digest, signature);
     }
 
-    function permit(address owner, address spender, uint256 value, uint256 deadline, bytes memory signature) public {
-        require(block.timestamp <= deadline, "SavingsEURe/permit-expired");
-        require(owner != address(0), "SavingsEURe/invalid-owner");
+    /// @inheritdoc ISavingsEURe
+    function permit(address owner, address spender, uint256 value, uint256 deadline, bytes memory signature)
+        public
+        override
+    {
+        if (block.timestamp > deadline) revert PermitExpired();
+        if (owner == address(0)) revert InvalidOwner();
 
-        uint256 nonce = _useNonce(owner);
+        bytes32 structHash = keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, value, _useNonce(owner), deadline));
+        bytes32 digest = _hashTypedDataV4(structHash);
 
-        bytes32 digest = keccak256(
-            abi.encodePacked(
-                "\x19\x01",
-                block.chainid == deploymentChainId ? _DOMAIN_SEPARATOR : _calculateDomainSeparator(block.chainid),
-                keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, value, nonce, deadline))
-            )
-        );
-
-        require(_isValidSignature(owner, digest, signature), "SavingsEURe/invalid-permit");
+        if (!_isValidSignature(owner, digest, signature)) revert InvalidPermit();
 
         _approve(owner, spender, value);
-        emit Approval(owner, spender, value);
     }
 
+    /// @inheritdoc ISavingsEURe
     function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
         external
+        override
     {
         permit(owner, spender, value, deadline, abi.encodePacked(r, s, v));
     }
-    /**
-     * @dev See {IERC20Permit-nonces}.
-     */
 
-    function nonces(address owner) public view virtual override(IERC20Permit, Nonces) returns (uint256) {
+    /// @inheritdoc ISavingsEURe
+    function nonces(address owner) public view virtual override(ISavingsEURe, Nonces) returns (uint256) {
         return super.nonces(owner);
     }
 
-    /**
-     * @dev See {IERC20Permit-DOMAIN_SEPARATOR}.
-     */
+    /// @inheritdoc ISavingsEURe
     // solhint-disable-next-line func-name-mixedcase
-    function DOMAIN_SEPARATOR() external view virtual returns (bytes32) {
+    function DOMAIN_SEPARATOR() external view virtual override returns (bytes32) {
         return _domainSeparatorV4();
-    }
-
-    function _calculateDomainSeparator(uint256 chainId) private view returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256(bytes(name())),
-                keccak256(bytes(VERSION)),
-                chainId,
-                address(this)
-            )
-        );
     }
 }

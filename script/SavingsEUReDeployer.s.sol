@@ -1,11 +1,11 @@
-// SPDX-License-Identifier: gpl-2.0
-pragma solidity ^0.8.19;
+// SPDX-License-Identifier: GPL-2.0-only
+pragma solidity ^0.8.20;
 
-import "forge-std/Script.sol";
-import "forge-std/console.sol";
-import "src/SavingsEURe.sol";
-import "src/InterestReceiver.sol";
-import "src/periphery/SavingsEUReAdapter.sol";
+import {Script} from "forge-std/Script.sol";
+import {console} from "forge-std/console.sol";
+import {SavingsEURe} from "src/SavingsEURe.sol";
+import {InterestReceiver} from "src/InterestReceiver.sol";
+import {SavingsEUReAdapter} from "src/periphery/SavingsEUReAdapter.sol";
 
 contract SavingsEUReDeployer is Script {
     function run() external {
@@ -30,13 +30,13 @@ contract SavingsEUReDeployer is Script {
                                 DEPLOYMENTS
         //////////////////////////////////////////////////////////////*/
 
-        SavingsEURe sEURe = new SavingsEURe("Savings EURe", "sEURe");
-        console.log("Deployed sEURe: %s", address(sEURe));
+        SavingsEURe savingsEURe = new SavingsEURe();
+        console.log("Deployed sEURe: %s", address(savingsEURe));
 
-        InterestReceiver interestReceiver = new InterestReceiver(address(sEURe));
+        InterestReceiver interestReceiver = new InterestReceiver(address(savingsEURe));
         console.log("Deployed InterestReceiver: %s", address(interestReceiver));
 
-        SavingsEUReAdapter adapter = new SavingsEUReAdapter(address(interestReceiver), payable(address(sEURe)));
+        SavingsEUReAdapter adapter = new SavingsEUReAdapter(address(interestReceiver), payable(address(savingsEURe)));
         console.log("Deployed SavingsEUReAdapter on Gnosis: %s", address(adapter));
 
         interestReceiver.setClaimer(address(adapter));

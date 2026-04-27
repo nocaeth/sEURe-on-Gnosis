@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.20;
 
-import "forge-std/Test.sol";
-import "forge-std/console.sol";
-import "./Setup.t.sol";
+import {console} from "forge-std/console.sol";
+import {InterestReceiver} from "src/InterestReceiver.sol";
+import {SetupTest} from "./Setup.t.sol";
 
 contract InterestReceiverTest is SetupTest {
+    event Initialized(uint256 indexed initialBalance, uint256 dripRate, uint256 nextClaimEpoch);
+    event ClaimerUpdated(address indexed previousClaimer, address indexed newClaimer);
+
     /*//////////////////////////////////////////////////////////////
                         BASIC VALIDATION
     //////////////////////////////////////////////////////////////*/
-    function testMetadata() public {
+    function testMetadata() public view {
         assertEq(address(rcv), address(rcv));
-        assertEq(address(sEURe.eure()), address(eure));
+        assertEq(sEURe.name(), "Savings EURe");
+        assertEq(sEURe.symbol(), "sEURe");
+        assertEq(sEURe.asset(), address(eure));
     }
 
     function testAlreadyInitialized() public {
@@ -24,7 +29,7 @@ contract InterestReceiverTest is SetupTest {
     function testInitialize_onlyClaimerAllowed() external {
         deal(address(eure), address(rcv), 50000 ether);
         vm.startPrank(alice);
-        vm.expectRevert("Not Claimer");
+        vm.expectRevert(bytes4(keccak256("NotClaimer()")));
         rcv.initialize();
         vm.stopPrank();
         // claimer (initializer) can initialize
@@ -34,15 +39,26 @@ contract InterestReceiverTest is SetupTest {
 
     function testInitialize_notEnoughBalance() external {
         vm.startPrank(initializer);
-        deal(address(eure), address(rcv), 5000 ether);
-        vm.expectRevert("Fill it up first");
+        deal(address(eure), address(rcv), rcv.MIN_EPOCH_BALANCE());
+        vm.expectRevert(bytes4(keccak256("InsufficientInitialBalance()")));
         rcv.initialize();
+    }
+
+    function testInitializeEmitsInitialized() external {
+        uint256 initialBalance = 50000 ether;
+        deal(address(eure), address(rcv), initialBalance);
+
+        vm.startPrank(initializer);
+        vm.expectEmit(true, true, true, true);
+        emit Initialized(initialBalance, initialBalance / rcv.epochLength(), block.timestamp + rcv.epochLength());
+        rcv.initialize();
+        vm.stopPrank();
     }
     /*//////////////////////////////////////////////////////////////
                         CLAIM LOGIC
     //////////////////////////////////////////////////////////////*/
 
-    function claimEOA() public returns (uint256 claimed) {
+    function claimEoa() public returns (uint256 claimed) {
         vm.startPrank(bob, bob);
         claimed = rcv.claim();
         vm.stopPrank();
@@ -51,21 +67,22 @@ contract InterestReceiverTest is SetupTest {
     function testClaim__FromAdapter() public {
         setClaimerAndInitialize();
         skipTime(1 hours);
-        uint256 claimable = rcv.previewClaimable();
+        uint256 expectedClaim = rcv.dripRate() * 1 hours;
+        uint256 rcvBalance = eure.balanceOf(address(rcv));
         // Deposit via adapter using EURe (not native xDAI)
         vm.startPrank(bob, bob);
         eure.approve(address(adapter), 1 ether);
         adapter.deposit(1 ether, bob);
         vm.stopPrank();
-        uint256 claimed = claimable - rcv.previewClaimable();
-        assertEq(claimable, claimed);
+        uint256 claimed = rcvBalance - eure.balanceOf(address(rcv));
+        assertEq(claimed, expectedClaim);
         assertGt(claimed, 0);
     }
 
     function testClaim__FromContract() public {
         setClaimerAndInitialize();
         skipTime(1 hours);
-        vm.expectRevert("Not valid Claimer");
+        vm.expectRevert(bytes4(keccak256("NotValidClaimer()")));
         rcv.claim();
     }
 
@@ -76,10 +93,10 @@ contract InterestReceiverTest is SetupTest {
         uint256 totalWithdrawable = sEURe.previewRedeem(shares);
         skipTime(1 days);
         testTopInterestReceiver();
-        uint256 sEUReBalance = eure.balanceOf(address(sEURe));
+        uint256 sEuReBalance = eure.balanceOf(address(sEURe));
         uint256 rcvBalance = eure.balanceOf(address(rcv));
-        uint256 claimed = claimEOA();
-        assertLe(sEUReBalance, sEURe.totalAssets());
+        uint256 claimed = claimEoa();
+        assertLe(sEuReBalance, sEURe.totalAssets());
         assertLe(eure.balanceOf(address(rcv)), rcvBalance);
         assertEq(sEURe.totalSupply(), shares);
         assertLe(totalWithdrawable, sEURe.previewRedeem(shares));
@@ -102,7 +119,7 @@ contract InterestReceiverTest is SetupTest {
         uint256 shares = sEURe.totalSupply();
         uint256 totalWithdrawable = sEURe.previewRedeem(shares);
         testTopInterestReceiver();
-        uint256 sEUReBalance = eure.balanceOf(address(sEURe));
+        uint256 sEuReBalance = eure.balanceOf(address(sEURe));
         uint256 rcvBalance = eure.balanceOf(address(rcv));
 
         uint256 endEpoch = rcv.nextClaimEpoch();
@@ -110,9 +127,8 @@ contract InterestReceiverTest is SetupTest {
         uint256 beforeRate = rcv.dripRate();
 
         skipTime(time); //skip time
-        uint256 claimable = rcv.previewClaimable();
         uint256 epochBalance = rcv.currentEpochBalance();
-        uint256 claimed = claimEOA();
+        uint256 claimed = claimEoa();
 
         console.log("GlobalTime: %s | Time: %s | CurrentTime: %s", globalTime, time, block.timestamp);
         console.log(
@@ -127,47 +143,43 @@ contract InterestReceiverTest is SetupTest {
             assertGe(eure.balanceOf(address(rcv)), rcvBalance);
         } else if (globalTime >= lastClaimTime + epoch) {
             assertEq(claimed, epochBalance);
-            if (rcvBalance - claimable >= epoch && globalTime != endEpoch) {
+            if (rcvBalance - claimed >= epoch && globalTime != endEpoch) {
                 assertEq(rcv.nextClaimEpoch(), block.timestamp + epoch);
                 assertGt(rcv.dripRate(), 0);
             }
-            assertEq(claimable, claimed);
             assertLe(eure.balanceOf(address(rcv)), rcvBalance);
         } else if (globalTime > endEpoch) {
             if (beforeRate > 0) {
                 assertGt(claimed, 0);
             }
 
-            if (rcvBalance - claimable >= epoch) {
+            if (rcvBalance - claimed >= epoch) {
                 assertEq(rcv.nextClaimEpoch(), block.timestamp + epoch);
                 assertGt(rcv.dripRate(), 0);
             }
-            assertEq(claimable, claimed);
             assertLe(eure.balanceOf(address(rcv)), rcvBalance);
         } else {
             assertEq(epochBalance - claimed, rcv.currentEpochBalance());
-            assertEq(claimable, claimed);
             assertLe(eure.balanceOf(address(rcv)), rcvBalance);
         }
 
         assertEq(eure.balanceOf(address(rcv)), rcvBalance - claimed);
-        assertEq(claimed, eure.balanceOf(address(sEURe)) - sEUReBalance);
+        assertEq(claimed, eure.balanceOf(address(sEURe)) - sEuReBalance);
         assertEq(sEURe.totalSupply(), shares);
-        assertLe(sEUReBalance, sEURe.totalAssets());
+        assertLe(sEuReBalance, sEURe.totalAssets());
         assertEq(sEURe.totalSupply(), shares);
         assertLe(totalWithdrawable, sEURe.previewRedeem(shares));
 
         vm.startPrank(bob);
-        eure.transfer(address(rcv), 10e18);
+        assertTrue(eure.transfer(address(rcv), 10e18));
         endEpoch = rcv.nextClaimEpoch();
         lastClaimTime = rcv.lastClaimTimestamp();
         beforeRate = rcv.dripRate();
         rcvBalance = eure.balanceOf(address(rcv));
         console.log("rcvBalance: %s ", rcvBalance);
         skipTime(time); //skip time
-        claimable = rcv.previewClaimable();
         epochBalance = rcv.currentEpochBalance();
-        claimed = claimEOA();
+        claimed = claimEoa();
         console.log("GlobalTime: %s | Time: %s | CurrentTime: %s", globalTime, time, block.timestamp);
         console.log(
             "nextClaimEpoch: %s | lastClaimTimestamp: %s | dripRate: %s",
@@ -180,33 +192,30 @@ contract InterestReceiverTest is SetupTest {
             assertGe(eure.balanceOf(address(rcv)), rcvBalance);
         } else if (globalTime >= lastClaimTime + epoch) {
             assertEq(claimed, epochBalance);
-            if (rcvBalance - claimable >= epoch && globalTime != endEpoch) {
+            if (rcvBalance - claimed >= epoch && globalTime != endEpoch) {
                 assertEq(rcv.nextClaimEpoch(), block.timestamp + epoch);
                 assertGt(rcv.dripRate(), 0);
             }
-            assertEq(claimable, claimed);
             assertLe(eure.balanceOf(address(rcv)), rcvBalance);
         } else if (globalTime > endEpoch) {
             if (beforeRate > 0) {
                 assertGt(claimed, 0);
             }
 
-            if (rcvBalance - claimable >= epoch) {
+            if (rcvBalance - claimed >= epoch) {
                 assertEq(rcv.nextClaimEpoch(), block.timestamp + epoch);
                 assertGt(rcv.dripRate(), 0);
             }
-            assertEq(claimable, claimed);
             assertLe(eure.balanceOf(address(rcv)), rcvBalance);
         } else {
             assertEq(epochBalance - claimed, rcv.currentEpochBalance());
-            assertEq(claimable, claimed);
             assertLe(eure.balanceOf(address(rcv)), rcvBalance);
         }
     }
 
     function skipFirstEpoch() public {
         skipTime(rcv.nextClaimEpoch() + 1);
-        claimEOA();
+        claimEoa();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -214,30 +223,47 @@ contract InterestReceiverTest is SetupTest {
     //////////////////////////////////////////////////////////////*/
 
     function testClaim_ifNotInitialized() external {
-        vm.expectRevert("Not Initialized");
-        claimEOA();
+        vm.expectRevert(bytes4(keccak256("NotInitialized()")));
+        claimEoa();
+    }
+
+    function testSetClaimerEmitsClaimerUpdated() external {
+        vm.startPrank(initializer);
+        vm.expectEmit(true, true, true, true);
+        emit ClaimerUpdated(initializer, alice);
+        rcv.setClaimer(alice);
+        vm.stopPrank();
+
+        assertEq(rcv.claimer(), alice);
+    }
+
+    function testSetClaimerRejectsZeroAddress() external {
+        vm.startPrank(initializer);
+        vm.expectRevert(bytes4(keccak256("ZeroAddress()")));
+        rcv.setClaimer(address(0));
+        vm.stopPrank();
     }
 
     function testClaim_IncreasedFromZeroBalance() external {
         setClaimerAndInitialize();
-        donateReceiverEURe();
+        donateReceiverEure();
         skipFirstEpoch();
         skipTime(1 hours);
         assertEq(rcv.dripRate(), rcv.currentEpochBalance() / epoch);
         assertEq(rcv.nextClaimEpoch(), rcv.lastClaimTimestamp() + epoch);
-        uint256 claimed = claimEOA();
+        uint256 claimed = claimEoa();
         assertEq(claimed, rcv.dripRate() * 1 hours);
     }
 
     function testClaim_endOfEpochMinus1() external {
         setClaimerAndInitialize();
-        donateReceiverEURe();
+        donateReceiverEure();
         skipFirstEpoch();
         skipTime(epoch - 1);
         uint256 rate = rcv.dripRate();
         assertEq(rate, rcv.currentEpochBalance() / epoch);
         assertEq(rcv.nextClaimEpoch(), rcv.lastClaimTimestamp() + epoch);
-        uint256 claimed = claimEOA();
+        uint256 claimed = claimEoa();
         assertEq(claimed, rcv.dripRate() * (epoch - 1));
         assertEq(rcv.dripRate(), rate);
         assertEq(rcv.nextClaimEpoch(), block.timestamp + 1);
@@ -245,14 +271,14 @@ contract InterestReceiverTest is SetupTest {
 
     function testClaim_endOfEpoch() external {
         setClaimerAndInitialize();
-        donateReceiverEURe();
+        donateReceiverEure();
         skipFirstEpoch();
         skipTime(epoch);
         uint256 rate = rcv.dripRate();
         uint256 epochBal = rcv.currentEpochBalance();
         assertEq(rate, epochBal / epoch);
         assertEq(rcv.nextClaimEpoch(), rcv.lastClaimTimestamp() + epoch);
-        uint256 claimed = claimEOA();
+        uint256 claimed = claimEoa();
         assertApproxEqAbs(claimed, rate * epoch, 500000);
         assertEq(claimed, epochBal);
         assertEq(rcv.currentEpochBalance(), 0);
@@ -262,14 +288,14 @@ contract InterestReceiverTest is SetupTest {
 
     function testClaim_endOfEpochPlus1ButNoDeposits() external {
         setClaimerAndInitialize();
-        donateReceiverEURe();
+        donateReceiverEure();
         skipFirstEpoch();
         skipTime(epoch + 1);
         uint256 rate = rcv.dripRate();
         uint256 epochBal = rcv.currentEpochBalance();
         assertEq(rate, epochBal / epoch);
         assertEq(rcv.nextClaimEpoch(), rcv.lastClaimTimestamp() + epoch);
-        uint256 claimed = claimEOA();
+        uint256 claimed = claimEoa();
         assertEq(claimed, epochBal);
         assertEq(rcv.dripRate(), 0);
         assertEq(rcv.currentEpochBalance(), 0);
@@ -278,16 +304,16 @@ contract InterestReceiverTest is SetupTest {
 
     function testClaim_endOfEpochWithNewDeposits() external {
         setClaimerAndInitialize();
-        donateReceiverEURe();
+        donateReceiverEure();
         skipFirstEpoch();
         skipTime(epoch / 2);
-        donateReceiverEURe();
+        donateReceiverEure();
         skipTime(epoch / 2);
         uint256 rate = rcv.dripRate();
         uint256 epochBal = rcv.currentEpochBalance();
         assertEq(rate, epochBal / epoch);
         assertEq(rcv.nextClaimEpoch(), rcv.lastClaimTimestamp() + epoch);
-        uint256 claimed = claimEOA();
+        uint256 claimed = claimEoa();
         assertApproxEqAbs(claimed, rate * epoch, 500000);
         assertEq(claimed, epochBal);
         assertEq(rcv.currentEpochBalance(), 0);
@@ -297,20 +323,20 @@ contract InterestReceiverTest is SetupTest {
 
     function testClaim_pastEndOfEpochWithNewDeposits() external {
         setClaimerAndInitialize();
-        donateReceiverEURe();
+        donateReceiverEure();
         skipFirstEpoch();
         skipTime(epoch / 2);
-        donateReceiverEURe();
-        donateReceiverEURe();
+        donateReceiverEure();
+        donateReceiverEure();
         uint256 rate = rcv.dripRate();
         uint256 balance = rcv.currentEpochBalance();
         assertEq(rate, balance / epoch);
         assertEq(rcv.nextClaimEpoch(), rcv.lastClaimTimestamp() + epoch);
-        uint256 claimed = claimEOA();
+        uint256 claimed = claimEoa();
         assertApproxEqAbs(claimed, rcv.dripRate() * (epoch / 2), 500000);
         skipTime(epoch);
         uint256 balance1 = rcv.currentEpochBalance();
-        uint256 claimed1 = claimEOA();
+        uint256 claimed1 = claimEoa();
         assertEq(claimed1, balance1);
         assertEq(claimed1, balance - claimed);
         assertEq(rcv.dripRate(), rcv.currentEpochBalance() / epoch);
@@ -337,7 +363,7 @@ contract InterestReceiverTest is SetupTest {
 
         // Bot deposits yield (simulating Monerium bot)
         deal(address(eure), address(this), 5000e18);
-        eure.transfer(address(rcv), 5000e18);
+        assertTrue(eure.transfer(address(rcv), 5000e18));
 
         // Skip into new epoch so yield gets incorporated
         skipTime(epoch + 1);
@@ -362,5 +388,86 @@ contract InterestReceiverTest is SetupTest {
 
         uint256 newSharePrice = sEURe.convertToAssets(1e18);
         assertGt(newSharePrice, initialSharePrice);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        VAULT APY & EDGE COVERAGE
+    //////////////////////////////////////////////////////////////*/
+
+    function testVaultAPY_notInitialized() public {
+        InterestReceiver fresh = new InterestReceiver(address(sEURe));
+        assertEq(fresh.vaultAPY(), 0);
+    }
+
+    function testVaultAPY_zeroDripRate() public {
+        setClaimerAndInitialize();
+        donateReceiverEure();
+        skipFirstEpoch();
+        skipTime(rcv.epochLength() + 1);
+        vm.startPrank(bob, bob);
+        rcv.claim();
+        vm.stopPrank();
+        assertEq(rcv.dripRate(), 0);
+        assertEq(rcv.vaultAPY(), 0);
+    }
+
+    function testVaultAPY_zeroDeposits() public {
+        setClaimerAndInitialize();
+        assertEq(sEURe.totalAssets(), 0);
+        assertEq(rcv.vaultAPY(), 0);
+    }
+
+    function testVaultAPY_happyPath() public {
+        setClaimerAndInitialize();
+        vm.startPrank(alice);
+        eure.approve(address(sEURe), 50e18);
+        sEURe.deposit(50e18, alice);
+        vm.stopPrank();
+        uint256 deposits = sEURe.totalAssets();
+        assertGt(deposits, 0);
+        uint256 drip = rcv.dripRate();
+        uint256 expected = (1 ether * (drip * 365 days)) / deposits;
+        assertEq(rcv.vaultAPY(), expected);
+    }
+
+    function testClaim_sameBlockSecondCallReturnsZero() public {
+        setClaimerAndInitialize();
+        skipTime(1 hours);
+        vm.startPrank(bob, bob);
+        uint256 c1 = rcv.claim();
+        assertGt(c1, 0);
+        assertEq(rcv.claim(), 0);
+        vm.stopPrank();
+    }
+
+    function testClaim_zeroReceiverBalance() public {
+        setClaimerAndInitialize();
+        deal(address(eure), address(rcv), 0);
+        vm.startPrank(bob, bob);
+        assertEq(rcv.claim(), 0);
+        vm.stopPrank();
+    }
+
+    /// Drip accrual can exceed book `currentEpochBalance` within an epoch when the book was
+    /// drained by a prior partial claim but `dripRate` is unchanged — exercise the cap branch.
+    function testClaim_calculateClaim_capsWhenLinearAccrualExceedsBook() public {
+        vm.startPrank(initializer);
+        uint256 el = rcv.epochLength();
+        deal(address(eure), address(rcv), el * 1 ether);
+        rcv.initialize();
+        rcv.setClaimer(address(adapter));
+        vm.stopPrank();
+
+        skipTime(el - 1);
+        vm.startPrank(bob, bob);
+        uint256 c1 = rcv.claim();
+        assertEq(c1, (el - 1) * 1 ether);
+        vm.stopPrank();
+
+        skipTime(2);
+        vm.startPrank(bob, bob);
+        uint256 c2 = rcv.claim();
+        assertEq(c2, 1 ether);
+        vm.stopPrank();
     }
 }

@@ -15,3 +15,13 @@ chiado = "${RPC_CHIADO}"
 
 [fuzz]
 runs=2000
+
+# Public getters intentionally match interfaces (eure, sEURe, vaultAPY); scripts use deriveKey.
+[lint]
+exclude_lints = [
+    "screaming-snake-case-immutable",
+    "screaming-snake-case-const",
+    "asm-keccak256",
+    "unsafe-cheatcode",
+]
+mixed_case_exceptions = ["ERC", "URI", "APY", "EURe", "EOA", "sEURe"]

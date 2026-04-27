@@ -1,20 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.20;
 
-import "forge-std/Test.sol";
-import "forge-std/console.sol";
-import "./Setup.t.sol";
-import "./Mocks/MockMultisig.sol";
+import {Vm} from "forge-std/Vm.sol";
+import {console} from "forge-std/console.sol";
+import {SetupTest} from "./Setup.t.sol";
+import {MockMultisig} from "./Mocks/MockMultisig.sol";
+import {ISavingsEURe} from "src/interfaces/ISavingsEURe.sol";
 
 contract SavingsEUReTest is SetupTest {
     event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
 
     bytes32 constant PERMIT_TYPEHASH =
         keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+    uint256 constant SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
 
-    function testMetadata() public {
+    function testMetadata() public view {
         assertEq(address(rcv), address(rcv));
-        assertEq(address(sEURe.eure()), address(eure));
+        assertEq(sEURe.name(), "Savings EURe");
+        assertEq(sEURe.symbol(), "sEURe");
+        assertEq(sEURe.asset(), address(eure));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -29,15 +34,15 @@ contract SavingsEUReTest is SetupTest {
         uint256 shares = sEURe.deposit(assets, sender);
         assertGe(sEURe.balanceOf(sender), shares);
         assertGt(shares, 0);
-        uint256 initialBalance_a = sEURe.balanceOf(sender);
-        uint256 initialBalance_b = sEURe.balanceOf(bob);
+        uint256 initialBalanceA = sEURe.balanceOf(sender);
+        uint256 initialBalanceB = sEURe.balanceOf(bob);
 
         vm.expectEmit();
         emit Transfer(sender, bob, shares);
-        sEURe.transfer(bob, shares);
+        assertTrue(sEURe.transfer(bob, shares));
 
-        assertEq(sEURe.balanceOf(sender), initialBalance_a - shares);
-        assertEq(sEURe.balanceOf(bob), initialBalance_b + shares);
+        assertEq(sEURe.balanceOf(sender), initialBalanceA - shares);
+        assertEq(sEURe.balanceOf(bob), initialBalanceB + shares);
         vm.stopPrank();
     }
 
@@ -178,19 +183,19 @@ contract SavingsEUReTest is SetupTest {
         assertGe(eureBalance, assets * 2);
 
         eure.approve(address(sEURe), eureBalance);
-        uint256 sharesERC20_a = sEURe.deposit(assets, alice);
-        uint256 assetsERC20_a = sEURe.mint(sharesERC20_a, alice);
-        assertEq(assetsERC20_a, assets);
+        uint256 sharesErc20A = sEURe.deposit(assets, alice);
+        uint256 assetsErc20A = sEURe.mint(sharesErc20A, alice);
+        assertEq(assetsErc20A, assets);
         vm.stopPrank();
         vm.startPrank(bob);
         eureBalance = eure.balanceOf(bob);
         assertGe(eureBalance, assets * 2);
         eure.approve(address(sEURe), eureBalance);
-        uint256 sharesERC20_b = sEURe.deposit(assets, bob);
-        uint256 assetsERC20_b = sEURe.mint(sharesERC20_b, bob);
-        assertEq(assetsERC20_b, assets);
+        uint256 sharesErc20B = sEURe.deposit(assets, bob);
+        uint256 assetsErc20B = sEURe.mint(sharesErc20B, bob);
+        assertEq(assetsErc20B, assets);
         vm.stopPrank();
-        assertGt(sharesERC20_a, 100);
+        assertGt(sharesErc20A, 100);
     }
 
     // checks that all withdraw functions from withdraw and redeem return the same shares given equivalent inputs.
@@ -198,25 +203,25 @@ contract SavingsEUReTest is SetupTest {
         uint256 assets = 1e18;
 
         vm.startPrank(alice);
-        uint256 initialShares_a = sEURe.balanceOf(alice);
+        uint256 initialSharesA = sEURe.balanceOf(alice);
         eure.approve(address(sEURe), assets * 2);
-        uint256 sharesDeposited_a = sEURe.deposit(assets * 2, alice);
-        uint256 sharesERC20_a = sEURe.withdraw(assets, alice, alice);
-        uint256 assetsERC20_a = sEURe.redeem(sharesERC20_a, alice, alice);
-        assertEq(assetsERC20_a, assets);
+        uint256 sharesDepositedA = sEURe.deposit(assets * 2, alice);
+        uint256 sharesErc20A = sEURe.withdraw(assets, alice, alice);
+        uint256 assetsErc20A = sEURe.redeem(sharesErc20A, alice, alice);
+        assertEq(assetsErc20A, assets);
         vm.stopPrank();
 
         vm.startPrank(bob);
         eure.approve(address(sEURe), assets * 2);
-        uint256 sharesDeposited_b = sEURe.deposit(assets * 2, bob);
-        uint256 sharesERC20_b = sEURe.withdraw(assets, bob, bob);
-        uint256 assetsERC20_b = sEURe.redeem(sharesERC20_a, bob, bob);
-        assertEq(assetsERC20_b, assets);
+        uint256 sharesDepositedB = sEURe.deposit(assets * 2, bob);
+        uint256 sharesErc20B = sEURe.withdraw(assets, bob, bob);
+        uint256 assetsErc20B = sEURe.redeem(sharesErc20A, bob, bob);
+        assertEq(assetsErc20B, assets);
         vm.stopPrank();
-        assertEq(sEURe.balanceOf(alice), initialShares_a);
-        assertEq(sharesDeposited_a, sharesDeposited_b);
-        assertEq(sharesERC20_a, sharesERC20_b);
-        assertGt(sharesERC20_a, 100);
+        assertEq(sEURe.balanceOf(alice), initialSharesA);
+        assertEq(sharesDepositedA, sharesDepositedB);
+        assertEq(sharesErc20A, sharesErc20B);
+        assertGt(sharesErc20A, 100);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -242,6 +247,69 @@ contract SavingsEUReTest is SetupTest {
 
         assertEq(sEURe.allowance(owner, address(0xCAFE)), 1e18);
         assertEq(sEURe.nonces(owner), 1);
+    }
+
+    function testPermitEmitsSingleApproval() public {
+        uint256 privateKey = 0xBEEF;
+        address owner = vm.addr(privateKey);
+        address spender = address(0xCAFE);
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
+            privateKey,
+            keccak256(
+                abi.encodePacked(
+                    "\x19\x01",
+                    sEURe.DOMAIN_SEPARATOR(),
+                    keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, 1e18, 0, block.timestamp))
+                )
+            )
+        );
+
+        vm.recordLogs();
+        sEURe.permit(owner, spender, 1e18, block.timestamp, v, r, s);
+
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        bytes32 approvalTopic = keccak256("Approval(address,address,uint256)");
+        uint256 approvalCount;
+        for (uint256 i; i < entries.length; i++) {
+            if (entries[i].topics[0] == approvalTopic) {
+                approvalCount++;
+            }
+        }
+        assertEq(approvalCount, 1);
+    }
+
+    function testPermitRejectsHighSSignature() public {
+        uint256 privateKey = 0xBEEF;
+        address owner = vm.addr(privateKey);
+        address spender = address(0xCAFE);
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
+            privateKey,
+            keccak256(
+                abi.encodePacked(
+                    "\x19\x01",
+                    sEURe.DOMAIN_SEPARATOR(),
+                    keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, 1e18, 0, block.timestamp))
+                )
+            )
+        );
+
+        uint8 malleableV = v == 27 ? 28 : 27;
+        bytes32 malleableS = bytes32(SECP256K1_N - uint256(s));
+
+        vm.expectRevert(ISavingsEURe.InvalidPermit.selector);
+        sEURe.permit(owner, spender, 1e18, block.timestamp, malleableV, r, malleableS);
+    }
+
+    function testPermitRejectsExpiredDeadline() public {
+        vm.expectRevert(ISavingsEURe.PermitExpired.selector);
+        sEURe.permit(alice, address(0xCAFE), 1e18, block.timestamp - 1, bytes(""));
+    }
+
+    function testPermitRejectsZeroOwner() public {
+        vm.expectRevert(ISavingsEURe.InvalidOwner.selector);
+        sEURe.permit(address(0), address(0xCAFE), 1e18, block.timestamp, bytes(""));
     }
 
     function testPermitContract() public {
@@ -314,7 +382,7 @@ contract SavingsEUReTest is SetupTest {
 
         bytes memory signature = abi.encode(r, s, bytes32(uint256(v) << 248), r2, s2, bytes32(uint256(v2) << 248));
 
-        vm.expectRevert("SavingsEURe/invalid-permit");
+        vm.expectRevert(ISavingsEURe.InvalidPermit.selector);
         sEURe.permit(mockMultisig, address(0xCAFE), 1e18, block.timestamp, signature);
     }
 }

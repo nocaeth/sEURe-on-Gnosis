@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.20;
 
-import "forge-std/Test.sol";
-import "forge-std/console.sol";
+import {Test} from "forge-std/Test.sol";
+import {console} from "forge-std/console.sol";
 import {SavingsEURe} from "src/SavingsEURe.sol";
 import {InterestReceiver} from "src/InterestReceiver.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
-import "src/periphery/SavingsEUReAdapter.sol";
-import "./Mocks/MockEURe.sol";
+import {SavingsEUReAdapter} from "src/periphery/SavingsEUReAdapter.sol";
+import {MockEURe} from "./Mocks/MockEURe.sol";
 
 contract SetupTest is Test {
     address public initializer = address(18);
@@ -31,7 +31,7 @@ contract SetupTest is Test {
                                 DEPLOYMENTS
         //////////////////////////////////////////////////////////////*/
 
-        sEURe = new SavingsEURe("Savings EURe", "sEURe");
+        sEURe = new SavingsEURe();
         console.log("Deployed sEURe on Gnosis: %s", address(sEURe));
 
         rcv = new InterestReceiver(address(sEURe));
@@ -59,10 +59,10 @@ contract SetupTest is Test {
 
     function testInitialize() public {
         vm.startPrank(initializer);
-        if (eure.balanceOf(address(rcv)) > 10000 ether) {
+        if (eure.balanceOf(address(rcv)) > rcv.MIN_EPOCH_BALANCE()) {
             rcv.initialize();
         } else {
-            vm.expectRevert("Fill it up first");
+            vm.expectRevert(bytes4(keccak256("InsufficientInitialBalance()")));
             rcv.initialize();
         }
         vm.stopPrank();
@@ -76,7 +76,7 @@ contract SetupTest is Test {
         vm.stopPrank();
         assertEq(rcv.claimer(), address(adapter));
         vm.startPrank(initializer);
-        vm.expectRevert("Not Claimer");
+        vm.expectRevert(bytes4(keccak256("NotClaimer()")));
         rcv.setClaimer(bob);
         vm.stopPrank();
     }
@@ -96,28 +96,34 @@ contract SetupTest is Test {
         uint256 initialPreview = sEURe.previewRedeem(10000);
         // Bob does a donation
         vm.startPrank(bob);
-        eure.transfer(address(sEURe), 10e18);
-        eure.transfer(address(rcv), 100e18);
+        assertTrue(eure.transfer(address(sEURe), 10e18));
+        assertTrue(eure.transfer(address(rcv), 100e18));
 
         vm.stopPrank();
         assertEq(eure.balanceOf(address(sEURe)), sEURe.totalAssets());
         assertGe(sEURe.previewRedeem(10000), initialPreview);
     }
 
-    function donateReceiverEURe() public {
+    function donateReceiverEure() public {
         vm.startPrank(bob);
-        eure.transfer(address(rcv), 3000e18);
+        assertTrue(eure.transfer(address(rcv), 3000e18));
         vm.stopPrank();
     }
 
     function testTopInterestReceiver() public {
-        uint256 initialPreview = rcv.previewClaimable();
+        uint256 initialDripRate = rcv.dripRate();
+        uint256 initialNextClaimEpoch = rcv.nextClaimEpoch();
+        uint256 initialCurrentEpochBalance = rcv.currentEpochBalance();
+        uint256 initialLastClaimTimestamp = rcv.lastClaimTimestamp();
         // Bob does a donation
         vm.startPrank(bob);
-        eure.transfer(address(rcv), 1000e18);
+        assertTrue(eure.transfer(address(rcv), 1000e18));
 
         vm.stopPrank();
-        assertEq(rcv.previewClaimable(), initialPreview);
+        assertEq(rcv.dripRate(), initialDripRate);
+        assertEq(rcv.nextClaimEpoch(), initialNextClaimEpoch);
+        assertEq(rcv.currentEpochBalance(), initialCurrentEpochBalance);
+        assertEq(rcv.lastClaimTimestamp(), initialLastClaimTimestamp);
     }
 
     /*//////////////////////////////////////////////////////////////

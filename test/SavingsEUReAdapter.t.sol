@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.20;
 
-import "forge-std/Test.sol";
-import "forge-std/console.sol";
-import "./Setup.t.sol";
+import {console} from "forge-std/console.sol";
+import {SetupTest} from "./Setup.t.sol";
 
 contract SavingsEUReAdapterTest is SetupTest {
     event Transfer(address indexed from, address indexed to, uint256 value);
 
-    function testMetadata() public {
+    function testMetadata() public view {
         assertEq(address(rcv), address(rcv));
-        assertEq(address(sEURe.eure()), address(eure));
+        assertEq(sEURe.name(), "Savings EURe");
+        assertEq(sEURe.symbol(), "sEURe");
+        assertEq(sEURe.asset(), address(eure));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -28,7 +29,7 @@ contract SavingsEUReAdapterTest is SetupTest {
     }
 
     function testDeposit() public {
-        donateReceiverEURe();
+        donateReceiverEure();
         setClaimerAndInitialize();
         skipTime(1 hours);
         uint256 assets = 1e18;
@@ -143,7 +144,7 @@ contract SavingsEUReAdapterTest is SetupTest {
         testDeposit();
 
         uint256 initialShares = sEURe.balanceOf(owner);
-        uint256 initialEURe = eure.balanceOf(receiver);
+        uint256 initialEuRe = eure.balanceOf(receiver);
         vm.startPrank(alice);
         sEURe.approve(address(adapter), initialShares);
         uint256 maxWithdraw = sEURe.maxWithdraw(owner);
@@ -152,7 +153,7 @@ contract SavingsEUReAdapterTest is SetupTest {
         assertEq(sEURe.balanceOf(owner), 0);
         assertGe(sEURe.totalAssets(), sEURe.maxWithdraw(owner));
         assertEq(0, sEURe.maxWithdraw(owner));
-        assertEq(eure.balanceOf(receiver), initialEURe + maxWithdraw);
+        assertEq(eure.balanceOf(receiver), initialEuRe + maxWithdraw);
         if (shares > 0 && eure.balanceOf(address(sEURe)) == 0) {
             revert();
         }
@@ -191,19 +192,19 @@ contract SavingsEUReAdapterTest is SetupTest {
         assertGe(eureBalance, assets * 2);
 
         eure.approve(address(adapter), eureBalance);
-        uint256 sharesERC20_a = adapter.deposit(assets, alice);
-        uint256 assetsERC20_a = adapter.mint(sharesERC20_a, alice);
-        assertEq(assetsERC20_a, assets);
+        uint256 sharesErc20A = adapter.deposit(assets, alice);
+        uint256 assetsErc20A = adapter.mint(sharesErc20A, alice);
+        assertEq(assetsErc20A, assets);
         vm.stopPrank();
         vm.startPrank(bob);
         eureBalance = eure.balanceOf(bob);
         assertGe(eureBalance, assets * 2);
         eure.approve(address(adapter), eureBalance);
-        uint256 sharesERC20_b = adapter.deposit(assets, bob);
-        uint256 assetsERC20_b = adapter.mint(sharesERC20_b, bob);
-        assertEq(assetsERC20_b, assets);
+        uint256 sharesErc20B = adapter.deposit(assets, bob);
+        uint256 assetsErc20B = adapter.mint(sharesErc20B, bob);
+        assertEq(assetsErc20B, assets);
         vm.stopPrank();
-        assertGt(sharesERC20_a, 100);
+        assertGt(sharesErc20A, 100);
     }
 
     // checks that withdraw and redeem return the same shares given equivalent inputs.
@@ -214,32 +215,84 @@ contract SavingsEUReAdapterTest is SetupTest {
         rcv.claim();
         vm.stopPrank();
         vm.startPrank(alice);
-        uint256 initialShares_a = sEURe.balanceOf(alice);
+        uint256 initialSharesA = sEURe.balanceOf(alice);
         sEURe.approve(address(adapter), sEURe.convertToShares(assets * 2));
 
         // Deposit, withdraw, deposit again, redeem
         eure.approve(address(adapter), assets * 2);
-        uint256 sharesDeposited_a = adapter.deposit(assets, alice);
-        uint256 sharesERC20_a = adapter.withdraw(assets, alice);
-        uint256 sharesDeposited_a1 = adapter.deposit(assets, alice);
-        uint256 assetsERC20_a = adapter.redeem(sharesERC20_a, alice);
-        assertGe(assetsERC20_a, assets);
-        assertEq(sharesDeposited_a, sharesDeposited_a1);
+        uint256 sharesDepositedA = adapter.deposit(assets, alice);
+        uint256 sharesErc20A = adapter.withdraw(assets, alice);
+        uint256 sharesDepositedA1 = adapter.deposit(assets, alice);
+        uint256 assetsErc20A = adapter.redeem(sharesErc20A, alice);
+        assertGe(assetsErc20A, assets);
+        assertEq(sharesDepositedA, sharesDepositedA1);
         vm.stopPrank();
 
         vm.startPrank(bob);
         sEURe.approve(address(adapter), sEURe.convertToShares(assets * 2));
         eure.approve(address(adapter), assets * 2);
-        uint256 sharesDeposited_b = adapter.deposit(assets, bob);
-        uint256 sharesERC20_b = adapter.withdraw(assets, bob);
-        uint256 sharesDeposited_b1 = adapter.deposit(assets, bob);
-        uint256 assetsERC20_b = adapter.redeem(sharesERC20_b, bob);
-        assertGe(assetsERC20_b, assets);
-        assertEq(sharesDeposited_b, sharesDeposited_b1);
+        uint256 sharesDepositedB = adapter.deposit(assets, bob);
+        uint256 sharesErc20B = adapter.withdraw(assets, bob);
+        uint256 sharesDepositedB1 = adapter.deposit(assets, bob);
+        uint256 assetsErc20B = adapter.redeem(sharesErc20B, bob);
+        assertGe(assetsErc20B, assets);
+        assertEq(sharesDepositedB, sharesDepositedB1);
         vm.stopPrank();
-        assertEq(sEURe.balanceOf(alice), initialShares_a);
-        assertEq(sharesDeposited_a, sharesDeposited_b);
-        assertEq(sharesERC20_a, sharesERC20_b);
-        assertGt(sharesERC20_a, 100);
+        assertEq(sEURe.balanceOf(alice), initialSharesA);
+        assertEq(sharesDepositedA, sharesDepositedB);
+        assertEq(sharesErc20A, sharesErc20B);
+        assertGt(sharesErc20A, 100);
+    }
+
+    function testVaultAPY_matchesReceiver() public {
+        setClaimerAndInitialize();
+        vm.startPrank(alice);
+        eure.approve(address(adapter), 20e18);
+        adapter.deposit(10e18, alice);
+        vm.stopPrank();
+        assertEq(adapter.vaultAPY(), rcv.vaultAPY());
+    }
+
+    function testWithdraw_clampsToMaxWithdraw() public {
+        setClaimerAndInitialize();
+        vm.startPrank(alice, alice);
+        eure.approve(address(adapter), 5e18);
+        adapter.deposit(5e18, alice);
+        vm.stopPrank();
+        uint256 maxW = sEURe.maxWithdraw(alice);
+        vm.startPrank(alice);
+        sEURe.approve(address(adapter), type(uint256).max);
+        uint256 shares = adapter.withdraw(type(uint256).max, alice);
+        vm.stopPrank();
+        assertEq(shares, sEURe.previewWithdraw(maxW));
+        assertEq(eure.balanceOf(alice), 100e18 - 5e18 + maxW);
+    }
+
+    function testRedeem_clampsToMaxRedeem() public {
+        setClaimerAndInitialize();
+        vm.startPrank(alice, alice);
+        eure.approve(address(adapter), 5e18);
+        adapter.deposit(5e18, alice);
+        vm.stopPrank();
+        uint256 maxS = sEURe.maxRedeem(alice);
+        vm.startPrank(alice);
+        sEURe.approve(address(adapter), type(uint256).max);
+        uint256 assets = adapter.redeem(type(uint256).max, alice);
+        vm.stopPrank();
+        assertEq(assets, sEURe.previewRedeem(maxS));
+        assertEq(sEURe.balanceOf(alice), 0);
+    }
+
+    /// EOA path: `msg.sender == tx.origin` runs `_claimHook` / `interestReceiver.claim()`.
+    function testDeposit_EoaPrankInvokesClaimHook() public {
+        setClaimerAndInitialize();
+        skipTime(1 hours);
+        uint256 expectedClaim = rcv.dripRate() * 1 hours;
+        uint256 rcvBefore = eure.balanceOf(address(rcv));
+        vm.startPrank(alice, alice);
+        eure.approve(address(adapter), 2e18);
+        adapter.deposit(1e18, alice);
+        vm.stopPrank();
+        assertEq(rcvBefore - eure.balanceOf(address(rcv)), expectedClaim);
     }
 }

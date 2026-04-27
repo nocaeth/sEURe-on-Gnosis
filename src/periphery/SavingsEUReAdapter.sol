@@ -1,62 +1,78 @@
-// SPDX-License-Identifier: agpl-3
-pragma solidity ^0.8.19;
+// SPDX-License-Identifier: AGPL-3.0-only
+pragma solidity ^0.8.20;
 
-import "../interfaces/IInterestReceiver.sol";
+import {IInterestReceiver} from "../interfaces/IInterestReceiver.sol";
+import {ISavingsEUReAdapter} from "../interfaces/ISavingsEUReAdapter.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin/token/ERC20/utils/SafeERC20.sol";
-import {SavingsEURe} from "../SavingsEURe.sol";
+import {ISavingsEURe} from "../interfaces/ISavingsEURe.sol";
 
-contract SavingsEUReAdapter {
+contract SavingsEUReAdapter is ISavingsEUReAdapter {
     using SafeERC20 for IERC20;
 
-    IInterestReceiver public immutable interestReceiver;
-    SavingsEURe public immutable sEURe;
-    IERC20 public immutable eure = IERC20(0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430);
+    /// @inheritdoc ISavingsEUReAdapter
+    IInterestReceiver public immutable override interestReceiver;
 
-    constructor(address interestReceiver_, address payable sEURe_) {
+    /// @inheritdoc ISavingsEUReAdapter
+    ISavingsEURe public immutable override sEURe;
+
+    /// @inheritdoc ISavingsEUReAdapter
+    IERC20 public immutable override eure = IERC20(0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430);
+
+    constructor(address interestReceiver_, address payable savingsEuRe_) {
         interestReceiver = IInterestReceiver(interestReceiver_);
-        sEURe = SavingsEURe(sEURe_);
-        eure.approve(sEURe_, type(uint256).max);
+        sEURe = ISavingsEURe(savingsEuRe_);
+        eure.approve(savingsEuRe_, type(uint256).max);
     }
 
     // only EOAs are able to claim interest.
     modifier claim() {
-        if (msg.sender == tx.origin) {
-            try interestReceiver.claim() {} catch {}
-        }
+        _claimHook();
         _;
     }
 
-    function deposit(uint256 assets, address receiver) public claim() returns (uint256) {
+    function _claimHook() internal {
+        if (msg.sender == tx.origin) {
+            try interestReceiver.claim() {} catch {}
+        }
+    }
+
+    /// @inheritdoc ISavingsEUReAdapter
+    function deposit(uint256 assets, address receiver) public override claim returns (uint256) {
         eure.safeTransferFrom(msg.sender, address(this), assets);
         uint256 shares = sEURe.deposit(assets, receiver);
         return shares;
     }
 
-    function mint(uint256 shares, address receiver) public claim() returns (uint256) {
+    /// @inheritdoc ISavingsEUReAdapter
+    function mint(uint256 shares, address receiver) public override claim returns (uint256) {
         eure.safeTransferFrom(msg.sender, address(this), sEURe.previewMint(shares));
         uint256 assets = sEURe.mint(shares, receiver);
         return assets;
     }
 
-    function withdraw(uint256 assets, address receiver) public claim() returns (uint256) {
+    /// @inheritdoc ISavingsEUReAdapter
+    function withdraw(uint256 assets, address receiver) public override claim returns (uint256) {
         uint256 maxAssets = sEURe.maxWithdraw(msg.sender);
         assets = (assets > maxAssets) ? maxAssets : assets;
         return sEURe.withdraw(assets, receiver, msg.sender);
     }
 
-    function redeem(uint256 shares, address receiver) public claim() returns (uint256) {
+    /// @inheritdoc ISavingsEUReAdapter
+    function redeem(uint256 shares, address receiver) public override claim returns (uint256) {
         uint256 maxShares = sEURe.maxRedeem(msg.sender);
         shares = (shares > maxShares) ? maxShares : shares;
         return sEURe.redeem(shares, receiver, msg.sender);
     }
 
-    function redeemAll(address receiver) public claim() returns (uint256) {
+    /// @inheritdoc ISavingsEUReAdapter
+    function redeemAll(address receiver) public override claim returns (uint256) {
         uint256 shares = sEURe.balanceOf(msg.sender);
         return sEURe.redeem(shares, receiver, msg.sender);
     }
 
-    function vaultAPY() external view returns (uint256) {
+    /// @inheritdoc ISavingsEUReAdapter
+    function vaultAPY() external view override returns (uint256) {
         return interestReceiver.vaultAPY();
     }
 }
