@@ -8,6 +8,18 @@ import {IERC4626} from "openzeppelin/interfaces/IERC4626.sol";
 /// @dev Extends the standard ERC4626 vault interface with EURe-specific metadata and a bytes-based permit overload
 /// that supports both EOA signatures and ERC1271 contract wallet signatures.
 interface ISavingsEURe is IERC4626 {
+    /// @notice Interest dispatcher address is zero or not a deployed contract.
+    error InvalidInterestDispatcher();
+
+    /// @notice Caller is not the configured interest dispatcher.
+    error NotInterestDispatcher();
+
+    /// @notice Interest claiming is not enabled yet.
+    error InterestClaimingNotEnabled();
+
+    /// @notice Emitted when the configured dispatcher enables vault-side claim synchronization.
+    event InterestClaimingEnabled();
+
     /// @notice Permit deadline has expired.
     error PermitExpired();
 
@@ -19,6 +31,15 @@ interface ISavingsEURe is IERC4626 {
 
     /// @notice EIP712 type hash used for permit signatures.
     function PERMIT_TYPEHASH() external view returns (bytes32);
+
+    /// @notice Dispatcher claimed before deposit, mint, withdraw, and redeem paths.
+    function interestDispatcher() external view returns (address);
+
+    /// @notice Whether vault share-changing operations claim dispatcher yield before accounting.
+    function interestClaimingEnabled() external view returns (bool);
+
+    /// @notice Enables dispatcher claim synchronization before vault share-changing operations.
+    function enableInterestClaiming() external;
 
     /// @notice Sets `value` as `spender`'s allowance over `owner`'s shares using an EIP712 signature.
     /// @dev Accepts a standard 65-byte ECDSA signature for EOAs or arbitrary ERC1271 signature data for contract wallets.

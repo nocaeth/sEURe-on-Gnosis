@@ -2,44 +2,44 @@
 pragma solidity ^0.8.20;
 
 import {Initializable} from "openzeppelin/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "openzeppelin/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin/token/ERC20/utils/SafeERC20.sol";
-import {IInterestReceiver} from "./interfaces/IInterestReceiver.sol";
+import {IInterestDispatcher} from "./interfaces/IInterestDispatcher.sol";
 import {ISavingsEURe} from "./interfaces/ISavingsEURe.sol";
 
-contract InterestReceiver is Initializable, IInterestReceiver {
+contract InterestDispatcher is Initializable, UUPSUpgradeable, IInterestDispatcher {
     using SafeERC20 for IERC20;
 
-    /// @inheritdoc IInterestReceiver
+    /// @inheritdoc IInterestDispatcher
     uint256 public constant override MIN_EPOCH_BALANCE = 100 ether;
 
-    /// @inheritdoc IInterestReceiver
+    /// @inheritdoc IInterestDispatcher
     uint256 public constant override epochLength = 5 days;
 
-    /// @inheritdoc IInterestReceiver
+    /// @inheritdoc IInterestDispatcher
     IERC20 public immutable override eure = IERC20(0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430);
 
-    /// @inheritdoc IInterestReceiver
-    ISavingsEURe public immutable override sEURe;
+    /// @inheritdoc IInterestDispatcher
+    ISavingsEURe public override sEURe;
 
-    /// @inheritdoc IInterestReceiver
-    address public override claimer;
+    /// @inheritdoc IInterestDispatcher
+    address public override owner;
 
-    /// @inheritdoc IInterestReceiver
+    /// @inheritdoc IInterestDispatcher
     uint256 public override dripRate;
 
-    /// @inheritdoc IInterestReceiver
+    /// @inheritdoc IInterestDispatcher
     uint256 public override nextClaimEpoch;
 
-    /// @inheritdoc IInterestReceiver
+    /// @inheritdoc IInterestDispatcher
     uint256 public override currentEpochBalance;
 
-    /// @inheritdoc IInterestReceiver
+    /// @inheritdoc IInterestDispatcher
     uint256 public override lastClaimTimestamp;
 
-    constructor(address _vault) {
-        sEURe = ISavingsEURe(_vault);
-        claimer = msg.sender;
+    constructor() {
+        _disableInitializers();
     }
 
     modifier isInitialized() {
@@ -47,22 +47,21 @@ contract InterestReceiver is Initializable, IInterestReceiver {
         _;
     }
 
-    modifier isClaimer() {
-        _requireClaimer();
-        _;
+    function _isRuntimeInitialized() internal view returns (bool) {
+        return address(sEURe) != address(0) && owner != address(0);
     }
 
     function _requireInitialized() internal view {
-        if (_getInitializedVersion() == 0) revert NotInitialized();
+        if (!_isRuntimeInitialized()) revert NotInitialized();
     }
 
-    function _requireClaimer() internal view {
-        if (tx.origin != msg.sender && msg.sender != claimer) revert NotValidClaimer();
-    }
+    /// @inheritdoc IInterestDispatcher
+    function initialize(address vault, address owner_) public override initializer {
+        if (vault == address(0) || owner_ == address(0)) revert ZeroAddress();
 
-    /// @inheritdoc IInterestReceiver
-    function initialize() public override initializer {
-        if (msg.sender != claimer) revert NotClaimer();
+        sEURe = ISavingsEURe(vault);
+        owner = owner_;
+        sEURe.enableInterestClaiming();
         currentEpochBalance = _balance();
         if (currentEpochBalance < MIN_EPOCH_BALANCE) revert InsufficientInitialBalance();
         lastClaimTimestamp = block.timestamp;
@@ -72,8 +71,8 @@ contract InterestReceiver is Initializable, IInterestReceiver {
         emit Initialized(currentEpochBalance, dripRate, nextClaimEpoch);
     }
 
-    /// @inheritdoc IInterestReceiver
-    function claim() public override isInitialized isClaimer returns (uint256 claimed) {
+    /// @inheritdoc IInterestDispatcher
+    function claim() public override isInitialized returns (uint256 claimed) {
         if (lastClaimTimestamp == block.timestamp) {
             return 0;
         }
@@ -142,9 +141,9 @@ contract InterestReceiver is Initializable, IInterestReceiver {
         return eure.balanceOf(address(this));
     }
 
-    /// @inheritdoc IInterestReceiver
+    /// @inheritdoc IInterestDispatcher
     function vaultAPY() external view override returns (uint256) {
-        if (_getInitializedVersion() == 0 || dripRate == 0) return 0;
+        if (!_isRuntimeInitialized() || dripRate == 0 || currentEpochBalance == 0) return 0;
 
         uint256 deposits = sEURe.totalAssets();
         if (deposits == 0) return 0;
@@ -153,14 +152,28 @@ contract InterestReceiver is Initializable, IInterestReceiver {
         return (1 ether * annualYield) / deposits;
     }
 
-    /// @inheritdoc IInterestReceiver
-    function setClaimer(address newClaimer) external override {
-        if (claimer != msg.sender) revert NotClaimer();
-        if (newClaimer == address(0)) revert ZeroAddress();
-
-        address previousClaimer = claimer;
-        claimer = newClaimer;
-
-        emit ClaimerUpdated(previousClaimer, newClaimer);
+    /// @inheritdoc IInterestDispatcher
+    function previewClaimable() external view override returns (uint256) {
+        if (!_isRuntimeInitialized() || lastClaimTimestamp == block.timestamp) return 0;
+        uint256 balance = _balance();
+        if (balance == 0) return 0;
+        (uint256 claimable,,,) = _calculateClaim(balance);
+        return claimable;
     }
+
+    /// @inheritdoc IInterestDispatcher
+    function transferOwnership(address newOwner) external override {
+        if (msg.sender != owner) revert NotOwner();
+        if (newOwner == address(0)) revert ZeroAddress();
+
+        address previousOwner = owner;
+        owner = newOwner;
+        emit OwnerUpdated(previousOwner, newOwner);
+    }
+
+    function _authorizeUpgrade(address) internal view override {
+        if (msg.sender != owner) revert NotOwner();
+    }
+
+    uint256[50] private __gap;
 }

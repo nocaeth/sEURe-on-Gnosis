@@ -4,28 +4,23 @@ pragma solidity ^0.8.20;
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
 import {ISavingsEURe} from "./ISavingsEURe.sol";
 
-/// @title IInterestReceiver
+/// @title IInterestDispatcher
 /// @notice Drips externally funded EURe yield into the SavingsEURe ERC4626 vault.
 /// @dev
 /// The receiver is funded externally with EURe and releases that balance into the vault over epochs.
-/// EOAs may trigger claims directly. Contract callers are restricted to `claimer`, which is expected to be
-/// the adapter after deployment so user interactions can opportunistically pull yield without letting
-/// arbitrary contracts manipulate claim timing.
-interface IInterestReceiver {
+/// Anyone may trigger claims; the vault synchronizes claims before ERC4626 accounting changes.
+interface IInterestDispatcher {
     /// @notice Caller tried to use a function before the receiver was initialized.
     error NotInitialized();
-
-    /// @notice Caller is not the configured claimer.
-    error NotClaimer();
-
-    /// @notice Caller is neither an EOA nor the configured claimer contract.
-    error NotValidClaimer();
 
     /// @notice Available EURe balance is below `MIN_EPOCH_BALANCE`.
     error InsufficientInitialBalance();
 
     /// @notice Address argument cannot be zero.
     error ZeroAddress();
+
+    /// @notice Caller is not the owner.
+    error NotOwner();
 
     /// @notice Emitted when EURe yield is transferred into the vault.
     /// @param amount Amount of EURe transferred to the vault.
@@ -37,18 +32,20 @@ interface IInterestReceiver {
     /// @param nextClaimEpoch Timestamp at which the initial epoch can roll over.
     event Initialized(uint256 indexed initialBalance, uint256 dripRate, uint256 nextClaimEpoch);
 
-    /// @notice Emitted when the contract claimer changes.
-    /// @param previousClaimer Previous claimer address.
-    /// @param newClaimer New claimer address.
-    event ClaimerUpdated(address indexed previousClaimer, address indexed newClaimer);
+    /// @notice Emitted when ownership changes.
+    /// @param previousOwner Previous owner.
+    /// @param newOwner New owner.
+    event OwnerUpdated(address indexed previousOwner, address indexed newOwner);
 
     /// @notice Initializes the first drip epoch.
-    /// @dev Requires enough EURe to avoid a zero `dripRate`. Can only be called once by the current claimer.
-    function initialize() external;
+    /// @dev Requires enough EURe to avoid a zero `dripRate`. Can only be called once through the proxy.
+    /// @param vault SavingsEURe vault that receives claimed yield.
+    /// @param owner_ Initial owner of the receiver.
+    function initialize(address vault, address owner_) external;
 
     /// @notice Transfers currently claimable EURe yield into the SavingsEURe vault.
     /// @dev
-    /// EOAs may call this directly. Contract callers must be `claimer`.
+    /// Permissionless keeper function. Direct vault deposits still claim first through `SavingsEURe`.
     /// Calling twice in the same block returns 0 and leaves state unchanged.
     /// If the receiver has no EURe balance, time is not advanced so future funding remains claimable.
     /// @return claimed Amount of EURe transferred into the vault.
@@ -62,12 +59,14 @@ interface IInterestReceiver {
     /// @return apy Annualized EURe drip divided by vault assets, scaled by 1e18.
     function vaultAPY() external view returns (uint256);
 
-    /// @notice Updates the contract caller allowed to trigger `claim`.
-    /// @dev
-    /// This is intentionally one-step because the claimer is expected to become the adapter contract,
-    /// which cannot accept a two-step handoff. EOAs can still call `claim` directly regardless of this value.
-    /// @param newClaimer New contract claimer address.
-    function setClaimer(address newClaimer) external;
+    /// @notice Returns the amount of EURe claim() would transfer into the vault at the current block.
+    /// @dev Returns 0 before initialization, in the same block as a claim, or when no yield is claimable.
+    /// @return claimable EURe that would be transferred on claim().
+    function previewClaimable() external view returns (uint256);
+
+    /// @notice Transfers ownership to `newOwner`.
+    /// @param newOwner New owner.
+    function transferOwnership(address newOwner) external;
 
     /// @notice Minimum EURe balance required to initialize or start a drip epoch.
     function MIN_EPOCH_BALANCE() external view returns (uint256);
@@ -81,8 +80,8 @@ interface IInterestReceiver {
     /// @notice Savings vault that receives dripped EURe yield.
     function sEURe() external view returns (ISavingsEURe);
 
-    /// @notice Contract allowed to call `claim` in addition to EOAs.
-    function claimer() external view returns (address);
+    /// @notice Contract owner.
+    function owner() external view returns (address);
 
     /// @notice EURe released per second during the active epoch.
     function dripRate() external view returns (uint256);
