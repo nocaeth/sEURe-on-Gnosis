@@ -4,18 +4,18 @@ pragma solidity ^0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
 import {SavingsEURe} from "src/SavingsEURe.sol";
-import {InterestReceiver} from "src/InterestReceiver.sol";
+import {InterestDispatcher} from "src/InterestDispatcher.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
-import {SavingsEUReAdapter} from "src/periphery/SavingsEUReAdapter.sol";
+import {ERC1967Proxy} from "openzeppelin/proxy/ERC1967/ERC1967Proxy.sol";
 import {MockEURe} from "./Mocks/MockEURe.sol";
 
 contract SetupTest is Test {
     address public initializer = address(18);
     address public alice = address(16);
     address public bob = address(17);
-    InterestReceiver public rcv;
+    InterestDispatcher public rcv;
+    InterestDispatcher public rcvImplementation;
     SavingsEURe public sEURe;
-    SavingsEUReAdapter public adapter;
     IERC20 public eure = IERC20(0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430);
     uint256 public globalTime;
     uint256 public epoch;
@@ -31,14 +31,12 @@ contract SetupTest is Test {
                                 DEPLOYMENTS
         //////////////////////////////////////////////////////////////*/
 
-        sEURe = new SavingsEURe();
+        rcvImplementation = new InterestDispatcher();
+        rcv = InterestDispatcher(address(new ERC1967Proxy(address(rcvImplementation), "")));
+        console.log("Deployed InterestDispatcher proxy on Gnosis: %s", address(rcv));
+
+        sEURe = new SavingsEURe(address(rcv));
         console.log("Deployed sEURe on Gnosis: %s", address(sEURe));
-
-        rcv = new InterestReceiver(address(sEURe));
-        console.log("Deployed InterestReceiver: %s", address(rcv));
-
-        adapter = new SavingsEUReAdapter(address(rcv), payable(address(sEURe)));
-        console.log("Deployed SavingsEUReAdapter on Gnosis: %s", address(adapter));
         vm.stopPrank();
 
         deal(address(eure), initializer, 100e18);
@@ -60,32 +58,32 @@ contract SetupTest is Test {
     function testInitialize() public {
         vm.startPrank(initializer);
         if (eure.balanceOf(address(rcv)) >= rcv.MIN_EPOCH_BALANCE()) {
-            rcv.initialize();
+            rcv.initialize(address(sEURe), initializer);
         } else {
             vm.expectRevert(bytes4(keccak256("InsufficientInitialBalance()")));
-            rcv.initialize();
+            rcv.initialize(address(sEURe), initializer);
         }
         vm.stopPrank();
     }
 
-    function testSetClaimer() public {
-        assertEq(rcv.claimer(), initializer);
+    function testTransferOwnership() public {
+        deal(address(eure), address(rcv), 10001 ether);
         vm.startPrank(initializer);
-        rcv.setClaimer(address(adapter));
-        console.log("Claimer configured: %s", address(adapter));
+        rcv.initialize(address(sEURe), initializer);
+        rcv.transferOwnership(alice);
+        console.log("Upgrade owner configured: %s", alice);
         vm.stopPrank();
-        assertEq(rcv.claimer(), address(adapter));
+        assertEq(rcv.owner(), alice);
         vm.startPrank(initializer);
-        vm.expectRevert(bytes4(keccak256("NotClaimer()")));
-        rcv.setClaimer(bob);
+        vm.expectRevert(bytes4(keccak256("NotOwner()")));
+        rcv.transferOwnership(bob);
         vm.stopPrank();
     }
 
-    function setClaimerAndInitialize() public {
+    function initializeReceiver() public {
         vm.startPrank(initializer);
         deal(address(eure), address(rcv), 10001 ether);
-        rcv.initialize();
-        rcv.setClaimer(address(adapter));
+        rcv.initialize(address(sEURe), initializer);
         vm.stopPrank();
     }
 
@@ -110,7 +108,7 @@ contract SetupTest is Test {
         vm.stopPrank();
     }
 
-    function testTopInterestReceiver() public {
+    function testTopInterestDispatcher() public {
         uint256 initialDripRate = rcv.dripRate();
         uint256 initialNextClaimEpoch = rcv.nextClaimEpoch();
         uint256 initialCurrentEpochBalance = rcv.currentEpochBalance();

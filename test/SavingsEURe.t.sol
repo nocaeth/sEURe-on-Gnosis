@@ -6,13 +6,12 @@ import {console} from "forge-std/console.sol";
 import {SetupTest} from "./Setup.t.sol";
 import {MockMultisig} from "./Mocks/MockMultisig.sol";
 import {ISavingsEURe} from "src/interfaces/ISavingsEURe.sol";
+import {SavingsEURe} from "src/SavingsEURe.sol";
 
 contract SavingsEUReTest is SetupTest {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
-    bytes32 constant PERMIT_TYPEHASH =
-        keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
     uint256 constant SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
 
     function testMetadata() public view {
@@ -22,11 +21,51 @@ contract SavingsEUReTest is SetupTest {
         assertEq(sEURe.asset(), address(eure));
     }
 
+    function testInterestDispatcherIsConfiguredAtDeploymentAndImmutable() public {
+        assertEq(sEURe.interestDispatcher(), address(rcv));
+
+        vm.prank(initializer);
+        (bool success,) = address(sEURe).call(abi.encodeWithSignature("setInterestDispatcher(address)", address(rcv)));
+
+        assertFalse(success);
+        assertEq(sEURe.interestDispatcher(), address(rcv));
+    }
+
     /*//////////////////////////////////////////////////////////////
                         CORE LOGIC
     //////////////////////////////////////////////////////////////*/
 
+    function testInitialDepositCanSeedVaultBeforeInterestDispatcherIsInitialized() public {
+        vm.startPrank(alice);
+        eure.approve(address(sEURe), 1e18);
+        uint256 shares = sEURe.deposit(1e18, alice);
+        vm.stopPrank();
+
+        assertGt(shares, 0);
+        assertEq(sEURe.totalAssets(), 1e18);
+        assertEq(sEURe.maxWithdraw(alice), 1e18);
+        assertFalse(sEURe.interestClaimingEnabled());
+    }
+
+    function testDepositSkipsClaimWhenInterestClaimingIsNotEnabled() public {
+        vm.startPrank(alice);
+        eure.approve(address(sEURe), 1e18);
+        sEURe.deposit(1e18, alice);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        eure.approve(address(sEURe), 1e18);
+        uint256 shares = sEURe.deposit(1e18, bob);
+        vm.stopPrank();
+
+        assertGt(shares, 0);
+        assertEq(sEURe.totalAssets(), 2e18);
+        assertEq(sEURe.maxWithdraw(bob), 1e18);
+        assertFalse(sEURe.interestClaimingEnabled());
+    }
+
     function testTransferShares() public {
+        initializeReceiver();
         uint256 assets = 1e18;
         address sender = alice;
         vm.startPrank(sender);
@@ -47,6 +86,7 @@ contract SavingsEUReTest is SetupTest {
     }
 
     function testDeposit() public {
+        initializeReceiver();
         uint256 assets = 1e18;
         address receiver = alice;
         vm.startPrank(receiver);
@@ -67,6 +107,7 @@ contract SavingsEUReTest is SetupTest {
     }
 
     function testFuzzDeposit(uint256 assets) public {
+        initializeReceiver();
         address receiver = alice;
 
         uint256 initialAssets = eure.balanceOf(receiver);
@@ -86,6 +127,7 @@ contract SavingsEUReTest is SetupTest {
     }
 
     function testFuzzMint(uint256 shares) public {
+        initializeReceiver();
         address receiver = alice;
 
         uint256 initialAssets = eure.balanceOf(receiver);
@@ -158,6 +200,7 @@ contract SavingsEUReTest is SetupTest {
     //////////////////////////////////////////////////////////////*/
 
     function testMintAndWithdraw(uint256 shares) public {
+        initializeReceiver();
         uint256 initialAssets = eure.balanceOf(alice);
         vm.assume(shares < sEURe.convertToShares(initialAssets));
 
@@ -174,6 +217,7 @@ contract SavingsEUReTest is SetupTest {
     }
 
     function testZeroSupplyResidualAssetsAreDilutedByVirtualOffset() public {
+        initializeReceiver();
         uint256 residual = 1e18;
         uint256 depositAssets = 1e18;
 
@@ -196,8 +240,30 @@ contract SavingsEUReTest is SetupTest {
         assertLt(immediateRedeemable, residual + depositAssets);
     }
 
+    function testDirectDepositCannotCapturePreviouslyAccruedReceiverYield() public {
+        initializeReceiver();
+
+        vm.startPrank(alice);
+        eure.approve(address(sEURe), 100e18);
+        sEURe.deposit(100e18, alice);
+        vm.stopPrank();
+
+        skipTime(1 days);
+
+        uint256 bobBalanceBefore = eure.balanceOf(bob);
+        vm.startPrank(bob, bob);
+        eure.approve(address(sEURe), 1e18);
+        sEURe.deposit(1e18, bob);
+        rcv.claim();
+        sEURe.redeem(sEURe.balanceOf(bob), bob, bob);
+        vm.stopPrank();
+
+        assertLe(eure.balanceOf(bob), bobBalanceBefore);
+    }
+
     // checks that all deposit functions from deposit and mint return the same shares given equivalent inputs.
     function test_CompareAllTypes_Deposits() public {
+        initializeReceiver();
         uint256 assets = 1e18;
 
         vm.startPrank(alice);
@@ -223,6 +289,7 @@ contract SavingsEUReTest is SetupTest {
 
     // checks that all withdraw functions from withdraw and redeem return the same shares given equivalent inputs.
     function test_CompareAllTypes_Withdrawals() public {
+        initializeReceiver();
         uint256 assets = 1e18;
 
         vm.startPrank(alice);
@@ -251,20 +318,36 @@ contract SavingsEUReTest is SetupTest {
                         PERMIT LOGIC
     //////////////////////////////////////////////////////////////*/
 
+    function _permitDigest(address owner, address spender, uint256 value, uint256 nonce, uint256 deadline)
+        internal
+        view
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                sEURe.DOMAIN_SEPARATOR(),
+                keccak256(abi.encode(sEURe.PERMIT_TYPEHASH(), owner, spender, value, nonce, deadline))
+            )
+        );
+    }
+
+    function _erc1271Signature(bytes32 digest1, uint256 privateKey1, bytes32 digest2, uint256 privateKey2)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        (uint8 v1, bytes32 r1, bytes32 s1) = vm.sign(privateKey1, digest1);
+        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(privateKey2, digest2);
+        return abi.encodePacked(r1, s1, bytes1(v1), bytes31(0), r2, s2, bytes1(v2), bytes31(0));
+    }
+
     function testPermit() public {
         uint256 privateKey = 0xBEEF;
         address owner = vm.addr(privateKey);
 
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
-            privateKey,
-            keccak256(
-                abi.encodePacked(
-                    "\x19\x01",
-                    sEURe.DOMAIN_SEPARATOR(),
-                    keccak256(abi.encode(PERMIT_TYPEHASH, owner, address(0xCAFE), 1e18, 0, block.timestamp))
-                )
-            )
-        );
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(privateKey, _permitDigest(owner, address(0xCAFE), 1e18, 0, block.timestamp));
 
         sEURe.permit(owner, address(0xCAFE), 1e18, block.timestamp, v, r, s);
 
@@ -277,16 +360,7 @@ contract SavingsEUReTest is SetupTest {
         address owner = vm.addr(privateKey);
         address spender = address(0xCAFE);
 
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
-            privateKey,
-            keccak256(
-                abi.encodePacked(
-                    "\x19\x01",
-                    sEURe.DOMAIN_SEPARATOR(),
-                    keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, 1e18, 0, block.timestamp))
-                )
-            )
-        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, _permitDigest(owner, spender, 1e18, 0, block.timestamp));
 
         vm.recordLogs();
         sEURe.permit(owner, spender, 1e18, block.timestamp, v, r, s);
@@ -302,21 +376,47 @@ contract SavingsEUReTest is SetupTest {
         assertEq(approvalCount, 1);
     }
 
-    function testPermitRejectsHighSSignature() public {
+    function testPermitAcceptsERC1271Owner() public {
+        uint256 privateKey1 = 0xA11CE;
+        uint256 privateKey2 = 0xB0B;
+        MockMultisig owner = new MockMultisig(vm.addr(privateKey1), vm.addr(privateKey2));
+        address spender = address(0xCAFE);
+        uint256 value = 1e18;
+        uint256 deadline = block.timestamp;
+
+        bytes32 digest = _permitDigest(address(owner), spender, value, 0, deadline);
+        bytes memory signature = _erc1271Signature(digest, privateKey1, digest, privateKey2);
+
+        sEURe.permit(address(owner), spender, value, deadline, signature);
+
+        assertEq(sEURe.allowance(address(owner), spender), value);
+        assertEq(sEURe.nonces(address(owner)), 1);
+    }
+
+    function testPermitRejectsInvalidERC1271Signature() public {
+        uint256 privateKey1 = 0xA11CE;
+        uint256 privateKey2 = 0xB0B;
+        MockMultisig owner = new MockMultisig(vm.addr(privateKey1), vm.addr(privateKey2));
+        address spender = address(0xCAFE);
+        uint256 value = 1e18;
+        uint256 deadline = block.timestamp;
+
+        bytes32 digest = _permitDigest(address(owner), spender, value, 0, deadline);
+        bytes memory signature = _erc1271Signature(digest, privateKey1, keccak256("wrong digest"), privateKey2);
+
+        vm.expectRevert(ISavingsEURe.InvalidPermit.selector);
+        sEURe.permit(address(owner), spender, value, deadline, signature);
+
+        assertEq(sEURe.allowance(address(owner), spender), 0);
+        assertEq(sEURe.nonces(address(owner)), 0);
+    }
+
+    function testPermitRejectsHighSSignatureWithInvalidSignerError() public {
         uint256 privateKey = 0xBEEF;
         address owner = vm.addr(privateKey);
         address spender = address(0xCAFE);
 
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
-            privateKey,
-            keccak256(
-                abi.encodePacked(
-                    "\x19\x01",
-                    sEURe.DOMAIN_SEPARATOR(),
-                    keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, 1e18, 0, block.timestamp))
-                )
-            )
-        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, _permitDigest(owner, spender, 1e18, 0, block.timestamp));
 
         uint8 malleableV = v == 27 ? 28 : 27;
         bytes32 malleableS = bytes32(SECP256K1_N - uint256(s));
@@ -326,8 +426,10 @@ contract SavingsEUReTest is SetupTest {
     }
 
     function testPermitRejectsExpiredDeadline() public {
+        uint256 deadline = block.timestamp - 1;
+
         vm.expectRevert(ISavingsEURe.PermitExpired.selector);
-        sEURe.permit(alice, address(0xCAFE), 1e18, block.timestamp - 1, bytes(""));
+        sEURe.permit(alice, address(0xCAFE), 1e18, deadline, uint8(0), bytes32(0), bytes32(0));
     }
 
     function testPermitRejectsZeroOwner() public {
@@ -335,77 +437,32 @@ contract SavingsEUReTest is SetupTest {
         sEURe.permit(address(0), address(0xCAFE), 1e18, block.timestamp, bytes(""));
     }
 
-    function testPermitContract() public {
-        uint256 privateKey1 = 0xBEEF;
-        address signer1 = vm.addr(privateKey1);
-        uint256 privateKey2 = 0xBEEE;
-        address signer2 = vm.addr(privateKey2);
+    function testPermitRejectsInvalidSigner() public {
+        uint256 privateKey = 0xBEEF;
+        address owner = alice;
+        address spender = address(0xCAFE);
 
-        address mockMultisig = address(new MockMultisig(signer1, signer2));
-
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
-            uint256(privateKey1),
-            keccak256(
-                abi.encodePacked(
-                    "\x19\x01",
-                    sEURe.DOMAIN_SEPARATOR(),
-                    keccak256(abi.encode(PERMIT_TYPEHASH, mockMultisig, address(0xCAFE), 1e18, 0, block.timestamp))
-                )
-            )
-        );
-
-        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(
-            uint256(privateKey2),
-            keccak256(
-                abi.encodePacked(
-                    "\x19\x01",
-                    sEURe.DOMAIN_SEPARATOR(),
-                    keccak256(abi.encode(PERMIT_TYPEHASH, mockMultisig, address(0xCAFE), 1e18, 0, block.timestamp))
-                )
-            )
-        );
-
-        bytes memory signature = abi.encode(r, s, bytes32(uint256(v) << 248), r2, s2, bytes32(uint256(v2) << 248));
-
-        sEURe.permit(mockMultisig, address(0xCAFE), 1e18, block.timestamp, signature);
-
-        assertEq(sEURe.allowance(mockMultisig, address(0xCAFE)), 1e18);
-        assertEq(sEURe.nonces(mockMultisig), 1);
-    }
-
-    function testPermitContractInvalidSignature() public {
-        uint256 privateKey1 = 0xBEEF;
-        address signer1 = vm.addr(privateKey1);
-        uint256 privateKey2 = 0xBEEE;
-        address signer2 = vm.addr(privateKey2);
-
-        address mockMultisig = address(new MockMultisig(signer1, signer2));
-
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(
-            uint256(privateKey1),
-            keccak256(
-                abi.encodePacked(
-                    "\x19\x01",
-                    sEURe.DOMAIN_SEPARATOR(),
-                    keccak256(abi.encode(PERMIT_TYPEHASH, mockMultisig, address(0xCAFE), 1e18, 0, block.timestamp))
-                )
-            )
-        );
-
-        (uint8 v2, bytes32 r2, bytes32 s2) = vm.sign(
-            uint256(0xCEEE),
-            keccak256(
-                abi.encodePacked(
-                    "\x19\x01",
-                    sEURe.DOMAIN_SEPARATOR(),
-                    keccak256(abi.encode(PERMIT_TYPEHASH, mockMultisig, address(0xCAFE), 1e18, 0, block.timestamp))
-                )
-            )
-        );
-
-        bytes memory signature = abi.encode(r, s, bytes32(uint256(v) << 248), r2, s2, bytes32(uint256(v2) << 248));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, _permitDigest(owner, spender, 1e18, 0, block.timestamp));
 
         vm.expectRevert(ISavingsEURe.InvalidPermit.selector);
-        sEURe.permit(mockMultisig, address(0xCAFE), 1e18, block.timestamp, signature);
+        sEURe.permit(owner, spender, 1e18, block.timestamp, v, r, s);
+    }
+
+    function testEnableInterestClaimingRevertsWhenNotInterestDispatcher() public {
+        vm.expectRevert(ISavingsEURe.NotInterestDispatcher.selector);
+        sEURe.enableInterestClaiming();
+    }
+}
+
+contract SavingsEUReConstructorTest is SetupTest {
+    function testConstructorRevertsOnZeroAddressInterestDispatcher() public {
+        vm.expectRevert(ISavingsEURe.InvalidInterestDispatcher.selector);
+        new SavingsEURe(address(0));
+    }
+
+    function testConstructorRevertsOnEmptyCodeInterestDispatcher() public {
+        address noCode = address(0xDEAD);
+        vm.expectRevert(ISavingsEURe.InvalidInterestDispatcher.selector);
+        new SavingsEURe(noCode);
     }
 }
