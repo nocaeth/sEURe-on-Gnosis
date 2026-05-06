@@ -1,18 +1,20 @@
 # X-Ray Report
 
-> sEURe | 270 nSLOC | 6ff3047 (`master`) | Foundry | 27/04/26
+> sEURe | 255 nSLOC | 255c50c (`master`) | Foundry | 05/05/26
 
 ---
 
 ## 1. Protocol Overview
 
-**What it does:** ERC-4626 vault for EURe on Gnosis Chain — users deposit EURe, receive sEURe shares, and earn yield dripped in over 5-day epochs.
+**What it does:** ERC-4626 yield vault for Monerium EURe on Gnosis Chain — users deposit EURe, receive sEURe shares that appreciate as yield drips in over 5-day epochs.
 
-- **Users**: EURe holders depositing for yield; Monerium bot funding the InterestReceiver
-- **Core flow**: Deposit EURe → receive sEURe shares → yield dripped into vault over epochs → share price appreciates → redeem for more EURe
-- **Key mechanism**: Epoch-based linear drip with `dripRate = epochBalance / epochLength`; same-block claim guard prevents flash-loan yield grabbing
-- **Token model**: EURe (underlying ERC-20 at `0x420CA...a3430`), sEURe (ERC-4626 share token with 3-decimal offset)
-- **Admin model**: `claimer` role on InterestReceiver — only role in the system, controls contract claim access and claimer transfer
+- **Users**: Deposit EURe, hold sEURe shares that appreciate; anyone can trigger yield claims
+- **Core flow**: Deposit EURe → receive sEURe → yield drips into vault over epochs → redeem for more EURe
+- **Key mechanism**: Epoch-based linear drip — InterestDispatcher releases EURe into vault at a constant rate per epoch, rolling over every 5 days
+- **Token model**: sEURe (ERC4626 share token, 18 decimals, 3-decimal virtual offset); EURe (underlying Monerium ERC20, 18 decimals)
+- **Admin model**: No owner on SavingsEURe; `owner` on InterestDispatcher controls UUPS upgrades and ownership transfer
+
+Adapted from [sDAI-on-Gnosis](https://github.com/gnosischain/sDAI-on-Gnosis).
 
 For a visual overview of the protocol's architecture, see the [architecture diagram](architecture.svg).
 
@@ -20,47 +22,55 @@ For a visual overview of the protocol's architecture, see the [architecture diag
 
 | Subsystem | Key Contracts | nSLOC | Role |
 |-----------|--------------|------:|------|
-| Core Vault | SavingsEURe | 46 | ERC-4626 vault wrapping EURe with permit support |
-| Yield Drip | InterestReceiver | 117 | Epoch-based EURe yield drip into the vault |
-| Periphery | SavingsEUReAdapter | 53 | User-facing adapter bundling vault ops with opportunistic claims |
+| Vault | SavingsEURe | 91 | ERC4626 vault wrapping EURe with permit support |
+| Yield Drip | InterestDispatcher | 119 | Epoch-based EURe drip into vault; UUPS upgradeable |
+| Interfaces | ISavingsEURe, IInterestDispatcher | 45 | Type definitions and NatSpec |
 
 ### How It Fits Together
 
-The core trick: external EURe funding is dripped into the vault linearly over 5-day epochs, incrementally increasing `totalAssets` without minting shares, so the sEURe/EURe exchange rate rises for all holders.
+The core trick: EURe yield flows through a permissionless epoch-based drip into the vault, and every share-changing operation claims yield first to keep accounting current.
 
-### Deposit via Adapter
-
-```
-User → SavingsEUReAdapter.deposit(assets, receiver)
-  ├─ _claimHook()                          ← EOA only: try interestReceiver.claim()
-  │   └─ InterestReceiver.claim()
-  │       ├─ _calculateClaim(balance)      ← compute claimable, next epoch params
-  │       ├─ update epoch state            ← currentEpochBalance, dripRate, nextClaimEpoch
-  │       └─ eure.safeTransfer(sEURe)      ← yield enters vault
-  ├─ eure.safeTransferFrom(user, adapter)
-  └─ sEURe.deposit(assets, receiver)       ← OZ ERC4626 mints shares
-```
-
-### Direct Vault Deposit
+### Deposit
 
 ```
-User → SavingsEURe.deposit(assets, receiver)   ← inherited ERC4626
-  ├─ eure.transferFrom(user, vault)
-  └─ _mint(receiver, shares)                   ← share conservation invariant
+SavingsEURe.deposit(assets, receiver)
+├─ SavingsEURe._claimInterest()
+│  └─ InterestDispatcher.claim()                        ← updates drip epoch, transfers EURe to vault
+└─ ERC4626.deposit(assets, receiver)
+   └─ ERC20._mint(receiver, shares)                   ← mints sEURe shares
+   └─ EURe.safeTransferFrom(user, vault, assets)      ← pulls EURe from user
 ```
 
-### Epoch Rollover (inside claim)
+### Withdraw
 
 ```
-InterestReceiver.claim()
-  └─ _calculateClaim(balance)
-      ├─ claimable = unclaimedTime * dripRate  ← partial epoch
-      ├─ claimable = currentEpochBalance       ← full epoch expired
-      ├─ claimable = min(claimable, balance)   ← bounded by actual holdings
-      └─ if block.timestamp > nextClaimEpoch:  ← rollover
-          remaining = balance - claimable
-          ├─ remaining < MIN_EPOCH_BALANCE → dripRate = 0, stop
-          └─ remaining >= MIN_EPOCH_BALANCE → new epoch with updated dripRate
+SavingsEURe.withdraw(assets, receiver, owner)
+├─ SavingsEURe._claimInterest()
+│  └─ InterestDispatcher.claim()                        ← updates drip epoch, transfers EURe to vault
+└─ ERC4626.withdraw(assets, receiver, owner)
+   └─ ERC20._burn(owner, shares)                      ← burns sEURe shares
+   └─ EURe.safeTransfer(receiver, assets)             ← pushes EURe to receiver
+```
+
+### Yield Drip
+
+```
+InterestDispatcher.claim()                               ← permissionless
+├─ InterestDispatcher._calculateClaim(balance)
+│  ├─ claimable = elapsed × dripRate                  ← linear drip within epoch
+│  └─ [if epoch elapsed] recalculate from remaining   ← rollover to new epoch
+├─ [update currentEpochBalance, dripRate, nextClaimEpoch, lastClaimTimestamp]
+└─ EURe.safeTransfer(address(sEURe), claimed)         ← increases vault totalAssets
+```
+
+### Initialization
+
+```
+InterestDispatcher.initialize(vault, owner_)             ← proxy initializer, once
+├─ SavingsEURe.enableInterestClaiming()               ← enables _claimInterest guard
+├─ currentEpochBalance = EURe.balanceOf(this)
+├─ dripRate = currentEpochBalance / epochLength       ← 5-day epoch
+└─ emit Initialized(...)
 ```
 
 ---
@@ -71,72 +81,75 @@ InterestReceiver.claim()
 
 ### Protocol Threat Profile
 
-> Protocol classified as: **Yield Aggregator / Vault** with **Liquid Staking** characteristics
+> Protocol classified as: **Yield Aggregator / Vault**
 
-ERC-4626 vault pattern with deposit/withdraw/convertToShares/convertToAssets, epoch-based yield drip, and share-based accounting. Secondary liquid-staking signal: derivative token (sEURe) with monotonically increasing exchange rate against the underlying.
+ERC4626 vault with epoch-based yield drip. Shares appreciate as EURe flows in from InterestDispatcher. No lending, no DEX, no governance — pure deposit/yield/withdraw lifecycle.
 
 ### Actors & Adversary Model
 
 | Actor | Trust Level | Capabilities |
 |-------|-------------|-------------|
-| User | Untrusted | Deposit, withdraw, redeem via adapter or directly on vault; call `claim()` as EOA |
-| Claimer | Bounded (single address, no delay) | Call `claim()` as contract; transfer claimer role (one-step, no delay) |
+| User | Untrusted | deposit, mint, withdraw, redeem, permit, transfer/approve sEURe |
+| Keeper / Anyone | Untrusted | claim() — triggers yield drip, no negative side effects |
+| owner | Bounded (single EOA, no timelock) | Upgrade InterestDispatcher implementation (UUPS), transfer ownership — instant, no delay |
+| interestDispatcher | Bounded (address, immutable) | enableInterestClaiming() — one-time, enables vault-side claim sync |
+| Monerium Bot | External | Funds InterestDispatcher with EURe via direct transfer |
 
 **Adversary Ranking** (ordered by threat level for this protocol type, adjusted by git evidence):
 
-1. **Share inflation attacker (first depositor)** — Canonical vault attack: manipulate empty-vault share price to steal from subsequent depositors.
-2. **Donation/direct-transfer attacker** — Sends EURe directly to InterestReceiver to manipulate epoch parameters at rollover.
-3. **Compromised claimer** — Can transfer claimer role instantly (one-step, no delay), but cannot extract user funds or change vault parameters.
+1. **Compromised owner** — Single EOA with instant UUPS upgrade power over InterestDispatcher; all vault operations depend on the receiver's correctness.
+2. **Share inflation attacker (first depositor)** — Classic ERC4626 empty-vault manipulation; mitigated by `_decimalsOffset(3)` but worth confirming sufficiency.
+3. **Donation / direct-transfer attacker** — Sending EURe directly to InterestDispatcher alters next epoch's drip rate and reported APY; intentional per design docs.
 
 See [entry-points.md](entry-points.md) for the full permissionless entry point map.
 
 ### Trust Boundaries
 
-- **User → Vault** — no access control needed; standard ERC4626 deposit/withdraw; share conservation enforced by OZ internals.
-- **Contract → InterestReceiver.claim()** — `isClaimer` modifier at `InterestReceiver.sol:60` restricts contract callers to the designated claimer address; EOAs always pass. No timelock, no multisig. One-step `setClaimer()` at `InterestReceiver.sol:157` with no delay.
+- **owner ↔ InterestDispatcher implementation** — No timelock or multisig; instant UUPS upgrade authority. Single EOA compromise → receiver can be replaced with malicious implementation → all vault ops blocked or manipulated. InterestDispatcher.sol:165-167.
+- **SavingsEURe ↔ InterestDispatcher claim()** — Every deposit/mint/withdraw/redeem calls `_claimInterest()` which calls `receiver.claim()`. If claim() reverts, all vault operations are blocked. SavingsEURe.sol:49.
 
 ### Key Attack Surfaces
 
-- **Epoch rollover donation inflation** &nbsp;&#91;[X-1](invariants.md#x-1)&#93; — `InterestReceiver._calculateClaim:128-136` uses `balance - claimable` as next epoch balance at rollover, where `balance = eure.balanceOf(address(this))`. Worth tracing whether a donation right before rollover inflates the next epoch's drip rate and whether `vaultAPY()` consumers are affected.
+- **InterestDispatcher UUPS upgrade authority** &nbsp;&#91;[X-1](invariants.md#x-1)&#93; — `owner` can replace implementation instantly (InterestDispatcher.sol:165-167); no timelock, no multisig. Worth tracing what a malicious implementation could do to vault operations that call claim() before every share change.
 
-- **Claim state committed before safeTransfer, failures swallowed** &nbsp;&#91;[X-2](invariants.md#x-2)&#93; — `InterestReceiver.claim():88-93` writes four storage variables before `eure.safeTransfer()` at line 93; the adapter's `try/catch` at `SavingsEUReAdapter.sol:36` swallows any revert. Worth confirming the transfer cannot fail under normal EURe operation (not paused, not blacklisting the vault).
+- **Vault↔Receiver operational coupling** &nbsp;&#91;[X-1](invariants.md#x-1), [X-2](invariants.md#x-2)&#93; — All four vault operations (deposit, mint, withdraw, redeem) call `_claimInterest()` first (SavingsEURe.sol:54,60,69,80). Worth confirming claim() has no revert path under normal operation and that the receiver cannot be bricked by external state changes.
 
-- **Single-step claimer transfer with no delay** — `InterestReceiver.setClaimer:157-165`. No two-step handoff, no timelock. The claimer role is limited (only controls contract claim access), but a compromised claimer could call `claim()` at adversarial timing.
+- **ERC4626 empty-vault share math** — `_decimalsOffset() = 3` provides a 10³ virtual-share offset (SavingsEURe.sol:124-126). Worth confirming this is sufficient given EURe's 18-decimal precision and typical deposit sizes.
 
-- **ERC4626 first-depositor share inflation** — `SavingsEURe._decimalsOffset:24` returns 3, providing OZ v5.3's virtual offset protection. Worth confirming the offset is sufficient for the vault's expected TVL range.
+- **EURe token behavior assumptions** — Vault uses `safeTransferFrom`/`safeTransfer` but assumes standard ERC20 behavior (no fee-on-transfer, no rebase). InterestDispatcher reads `eure.balanceOf(address(this))` for accounting (InterestDispatcher.sol:141). Worth confirming Monerium EURe is a vanilla ERC20.
 
-- **Adapter claim only for EOAs** — `SavingsEUReAdapter._claimHook:35` checks `msg.sender == tx.origin`; contract callers (DeFi composability) do not trigger claims. Worth confirming this is acceptable for intended integrations.
+- **vaultAPY display metric** — Derived from `dripRate * 365 days / totalAssets` (InterestDispatcher.sol:151-152). Not oracle-validated; direct EURe transfers to receiver affect next epoch's drip rate. NatSpec explicitly warns integrators. Worth confirming no downstream protocol uses it as a price feed.
+
+- **Integer division in drip rate** — `dripRate = currentEpochBalance / epochLength` (InterestDispatcher.sol:69) and `remaining / epochLength` at rollover (L132). Remainder locked until rollover. Worth checking if rounding direction is consistently conservative or if it creates systematic drift.
+
+### Upgrade Architecture Concerns
+
+- **InterestDispatcher is UUPS upgradeable** — `_authorizeUpgrade` checks `msg.sender == owner` (InterestDispatcher.sol:165-167). No timelock, no delay. Storage layout must be preserved across upgrades. Constructor calls `_disableInitializers()` (L41-43) preventing implementation contract initialization.
 
 ### Protocol-Type Concerns
 
 **As a Yield Aggregator / Vault:**
-- `totalAssets()` reads `eure.balanceOf(address(vault))` via OZ ERC4626 default — direct EURe donation to the vault changes share price without going through deposit. Worth confirming OZ's virtual offset mitigates this for the expected TVL range.
-- `_decimalsOffset() = 3` provides 10³ = 1000 virtual shares — standard OZ v5.3 inflation protection. Verify this is adequate for vault size.
-
-**As a Liquid Staking derivative:**
-- sEURe exchange rate increases monotonically from yield — no rebasing, no slashing. The rate is purely a function of `totalAssets / totalSupply` where `totalAssets` only grows from claim transfers.
+- `totalAssets()` reads `asset.balanceOf(address(this))` via OZ ERC4626 — direct EURe donations to the vault (not through deposit) increase share price. The 3-decimal virtual offset mitigates first-depositor inflation. SavingsEURe.sol:124-126.
+- No strategy contract — yield comes from InterestDispatcher drips, not from deploying funds into external protocols. This limits the attack surface to the receiver's epoch accounting.
 
 ### Temporal Risk Profile
 
 **Deployment & Initialization:**
-- `InterestReceiver.initialize():64-73` must be called by the deployer (current claimer) while `claimer` hasn't been transferred to the adapter yet. The README documents this ordering requirement explicitly. After `setClaimer(adapter)`, only the adapter could call `initialize` as a contract, but the adapter doesn't expose it. **Mitigated** by documented deployment sequence.
-- `initialize()` requires `currentEpochBalance > MIN_EPOCH_BALANCE` (100 EURe). Deployment must fund the receiver first. **Mitigated** by the guard at `InterestReceiver.sol:67`.
+- `initialize()` gated by `initializer` modifier and proxy pattern — called during deployment broadcast to prevent front-running. Receiver must hold ≥100 EURe (`MIN_EPOCH_BALANCE`). Deployment ordering: implementation → proxy → vault → fund receiver → initialize → seed vault (all in single broadcast).
 
 ### Composability & Dependency Risks
 
 **Dependency Risk Map:**
 
-> **EURe (ERC-20)** — via `SavingsEURe`, `InterestReceiver`, `SavingsEUReAdapter`
-> - Assumes: standard ERC-20 behavior (exact transfer amounts, no fees, no rebasing)
-> - Validates: `SafeERC20` used throughout; no fee-on-transfer handling (no `balanceOf` diff checks)
-> - Mutability: Immutable (no proxy, hardcoded at `0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430`)
-> - On failure: `safeTransfer`/`safeTransferFrom` revert on failure
+> **EURe (Monerium)** — via `InterestDispatcher.sol:21`, `SavingsEURe.sol:27`
+> - Assumes: Standard ERC20 behavior (exact transfer amounts, no rebase, no fee-on-transfer)
+> - Validates: Uses SafeERC20 for transfer/transferFrom
+> - Mutability: Immutable (hardcoded address `0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430`)
+> - On failure: revert
 
-**Token Assumptions** *(unvalidated only)*:
-- EURe: assumes no fee-on-transfer — impact if violated: vault accounting would drift (deposits record more assets than received)
-
-**Shared State Exposure:**
-- `InterestReceiver._balance()` reads `eure.balanceOf(address(this))` — any address can change this value via direct transfer, affecting epoch rollover calculations (see X-1).
+**Token Assumptions** *(unvalidated)*:
+- EURe: assumes no fee-on-transfer — impact if violated: vault accounting > real balance, share price inflation
+- EURe: assumes no rebasing — impact if violated: balanceOf drift between claim and deposit/withdraw
 
 ---
 
@@ -146,12 +159,12 @@ See [entry-points.md](entry-points.md) for the full permissionless entry point m
 >
 > A dedicated reference file contains the complete invariant analysis — do not look here for the catalog.
 >
-> - **9 Enforced Guards** (`G-1` … `G-9`) — per-call preconditions with `Check` / `Location` / `Purpose`
-> - **3 Single-Contract Invariants** (`I-1` … `I-3`) — Conservation, Bound, StateMachine
-> - **2 Cross-Contract Invariants** (`X-1` … `X-2`) — caller/callee pairs that cross scope boundaries
-> - **1 Economic Invariant** (`E-1`) — higher-order property deriving from `I-1` + `X-2`
+> - **15 Enforced Guards** (`G-1` … `G-15`) — per-call preconditions with `Check` / `Location` / `Purpose`
+> - **4 Single-Contract Invariants** (`I-1` … `I-4`) — StateMachine, Bound, Conservation, Temporal
+> - **2 Cross-Contract Invariants** (`X-1` … `X-2`) — vault↔receiver dependency chain
+> - **1 Economic Invariant** (`E-1`) — monotonic share price
 >
-> Every inferred block cites a concrete Δ-pair, guard-lift + write-sites, state edge, or NatSpec quote. The **On-chain=No** blocks are the high-signal ones — each is simultaneously an invariant and a potential bug. Attack-surface bullets above cross-link directly into the relevant blocks (e.g. `[X-1]`, `[X-2]`).
+> Every inferred block cites a concrete Δ-pair, guard-lift + write-sites, state edge, temporal predicate, or NatSpec quote. The **On-chain=No** blocks are the high-signal ones — each is simultaneously an invariant and a potential bug. Attack-surface bullets above cross-link directly into the relevant blocks (e.g. `[X-1]`, `[X-2]`).
 
 ---
 
@@ -159,10 +172,10 @@ See [entry-points.md](entry-points.md) for the full permissionless entry point m
 
 | Aspect | Status | Notes |
 |--------|--------|-------|
-| README | Present | `README.md` — architecture overview, deployment ordering, contract descriptions |
-| NatSpec | ~6 annotations | `@inheritdoc` on public state vars; `@notice`/`@dev` on interface functions; sparse on internal logic |
-| Spec/Whitepaper | Missing | No formal spec; README serves as lightweight spec (per spec: "yield cannot be grabbed in a single block") |
-| Inline Comments | Sparse | Key design decisions commented (e.g., `// only EOAs are able to claim interest`, `_claimHook` try/catch rationale) |
+| README | Present | README.md — deployment, security notes, integration notes |
+| NatSpec | ~4 annotations | Sparse — functions documented but invariants not explicitly stated in code |
+| Spec/Whitepaper | Present | README.md + referenced CHANGES-FROM-SDAI.md |
+| Inline Comments | Sparse | Key logic in `_calculateClaim` uncommented |
 
 ---
 
@@ -170,112 +183,108 @@ See [entry-points.md](entry-points.md) for the full permissionless entry point m
 
 | Metric | Value | Source |
 |--------|-------|--------|
-| Test files | 9 | File scan (always reliable) |
-| Test functions | 69 (85 including harness) | File scan (always reliable) |
-| Line coverage | 100.00% (155/155) | `forge coverage` |
-| Branch coverage | 100.00% (27/27) | `forge coverage` |
-| Statement coverage | 100.00% (169/169) | `forge coverage` |
+| Test files | 7 | File scan (always reliable) |
+| Test functions | 68 | File scan (always reliable) |
+| Line coverage | 100.00% (169/169) | forge coverage |
+| Branch coverage | 100.00% (30/30) | forge coverage |
 
 ### Test Depth
 
 | Category | Count | Contracts Covered |
 |----------|-------|-------------------|
-| Unit | 60+ | SavingsEURe, InterestReceiver, SavingsEUReAdapter |
-| Stateless Fuzz | 9 | SavingsEURe, InterestReceiver |
-| Stateful Fuzz (Foundry) | 0 | none |
-| Stateful Fuzz (Echidna) | 0 | none |
-| Formal Verification (Certora) | 0 | none |
-| Formal Verification (Halmos) | 0 | none |
-| Formal Verification (HEVM) | 0 | none |
+| Unit | 63 | SavingsEURe, InterestDispatcher, deploy script |
+| Stateless Fuzz | 5 | SavingsEURe, InterestDispatcher |
+| Stateful Fuzz (Foundry) | 0 | — |
+| Stateful Fuzz (Echidna) | 0 | — |
+| Formal Verification (Certora) | 0 | — |
+| Fork | 0 | — |
 
 ### Gaps
 
-- **No stateful fuzz testing** — epoch boundary logic (`_calculateClaim` rollover paths) is stateful by nature; unit tests may not cover multi-epoch sequences with adversarial timing.
-- **No formal verification** — drip rate math and epoch rollover arithmetic are financial calculations that benefit from formal methods.
-- **No fork tests** — protocol interacts with real EURe token on Gnosis; fork tests would validate SafeERC20 assumptions against the deployed token.
+- **No stateful fuzz / invariant tests** — Epoch drip accounting and ERC4626 share math across multi-operation sequences are untested by property-based tools.
+- **No fork tests** — Protocol behavior against real EURe token on Gnosis is unverified.
+- **No formal verification** — Drip rate calculation and share price monotonicity are mathematically amenable to formal methods.
 
 ---
 
 ## 6. Developer & Git History
 
-> Repo shape: `normal_dev` — 3 source-touching commits over 18 days; short but visible history.
+> Repo shape: normal_dev — 5 source-touching commits over 18 days
 
 ### Contributors
 
 | Author | Commits | Source Lines (+/-) | % of Source Changes |
 |--------|--------:|--------------------|--------------------:|
-| daveai | 3 | +382 / -0 | 53.2% |
-| Luigy-Lemon | 1 | +336 / -0 | 46.8% |
-
-Two-developer concentration: 100% of source changes from 2 authors across 4 commits.
+| daveai | 3 | +382 / -23 | 52.1% |
+| Luigy-Lemon | 7 | +351 / -192 | 47.9% |
 
 ### Review & Process Signals
 
 | Signal | Value | Assessment |
 |--------|-------|------------|
 | Unique contributors | 2 | Small team |
-| Merge commits | 0 of 4 (0%) | No merge commits — likely no formal peer review |
+| Merge commits | 0 of 10 (0%) | No merge commits — likely no peer review |
 | Repo age | 2026-04-09 → 2026-04-27 | 18 days |
-| Recent source activity (30d) | 3 commits | Active — most changes in last 30 days |
-| Test co-change rate | 100% | All source-changing commits also modify tests |
+| Recent source activity (30d) | 5 commits | Active — late burst before audit |
+| Test co-change rate | 100% | Every source commit also modifies test files |
 
 ### File Hotspots
 
 | File | Modifications | Note |
 |------|-------------:|------|
-| src/InterestReceiver.sol | 3 | Highest churn — core drip logic |
-| src/SavingsEURe.sol | 3 | Vault + permit logic |
-| src/periphery/SavingsEUReAdapter.sol | 3 | Adapter with claim hook |
-| src/interfaces/IInterestReceiver.sol | 3 | Interface definitions |
-| src/interfaces/ISavingsEUReAdapter.sol | 3 | Interface definitions |
-| src/interfaces/ISavingsEURe.sol | 1 | Least modified |
+| src/InterestDispatcher.sol | 4 | Highest churn — all fix-scored commits touch it |
+| src/SavingsEURe.sol | 3 | Core vault logic |
+| src/interfaces/IInterestDispatcher.sol | 4 | Interface churn suggests design iteration |
 
 ### Security-Relevant Commits
 
-**Score** = weighted sum of fix-like signals in a commit: message keywords (fix, bug, reentrancy, overflow...), diff patterns (deletes code, changes `require`/`assert`, touches access control or accounting), and change shape (focused = higher). **10+ warrants a manual diff.**
+**Score** = weighted sum of fix-like signals. **10+ warrants a manual diff.**
 
 | SHA | Date | Subject | Score | Key Signal |
 |-----|------|---------|------:|------------|
-| bba8371 | 2026-04-09 | sEURe savings vault — adapted from sDAI-on-Gnosis | 15 | Initial implementation: fund flows, signatures, access control |
-| 962607b | 2026-04-09 | remove old OZ | 15 | Access control tightening (+11), guards added (+9) |
-| 6ff3047 | 2026-04-27 | Upgrade to OZ v5.3, custom errors, interfaces | 13 | Guards removed (-11), access control changes (+6/-1), 526 lines |
+| 35f6334 | 2026-04-27 | Audit artifacts, x-ray docs, PoC, and receiver/docs hardening | 17 | hardening/validation + adds runtime guards + tightens access control |
+| bba8371 | 2026-04-09 | sEURe savings vault — adapted from sDAI-on-Gnosis | 15 | spans 3 security domains + adds guards |
+| 962607b | 2026-04-09 | remove old OZ | 15 | 355 lines changed, 3 security domains |
+| 6ff3047 | 2026-04-27 | Upgrade to OZ v5.3, custom errors, interfaces, expanded tests | 13 | removes 11 runtime guards + large change (526 lines) |
+| 6f38210 | 2026-04-27 | feat: update audit report, harden interfaces and adapter, expand tests | 11 | hardening + spans oracle/signature/accounting |
 
 ### Dangerous Area Evolution
 
 | Security Area | Commits | Key Files |
 |--------------|--------:|-----------|
-| fund_flows | 3 | InterestReceiver.sol, SavingsEUReAdapter.sol, SavingsEURe.sol |
+| fund_flows | 4 | InterestDispatcher.sol, SavingsEURe.sol |
+| oracle_price | 4 | IInterestDispatcher.sol |
 | signatures | 3 | SavingsEURe.sol, ISavingsEURe.sol |
 
 ### Forked Dependencies
 
 | Library | Path | Upstream | Status | Notes |
 |---------|------|----------|--------|-------|
-| openzeppelin-contracts | `lib/openzeppelin-contracts` | OpenZeppelin | Submodule | Contains pragma versions `>=0.4.22 <0.9.0` and `>=0.6.0 <0.9.0` from legacy OZ files; in-scope files use `^0.8.20` |
+| openzeppelin-contracts | lib/openzeppelin-contracts | OpenZeppelin | Submodule | Standard OZ v5.3; no modifications detected |
 
 ### Security Observations
 
-- **Two-developer concentration** — daveai (53%) + Luigy-Lemon (47%) = 100% of source; no independent third reviewer.
-- **No merge commits** — 0 of 4 commits merged; likely no formal peer review process.
-- **Large initial commit** — `962607b` (355 lines) and `6ff3047` (526 lines) are large changes touching all security areas simultaneously.
-- **100% test co-change rate** — every source-changing commit also modifies tests, indicating disciplined development.
-- **18-day history** — very young codebase; all commits within 3 weeks.
+- **Two-dev concentration** — daveai (52%) + Luigy-Lemon (48%) = 100% of source changes.
+- **No merge commits** — 0/10; likely no formal code review process.
+- **InterestDispatcher.sol is #1 hotspot** — 4 modifications across all fix-scored commits.
+- **Late burst before audit** — 5 source-touching commits in 18 days, 4 on 2026-04-27.
+- **Guard removal in 6ff3047** — removes 11 runtime guards while upgrading to OZ v5.3; worth manual diff to confirm replacements are equivalent.
+- **Fix co-change rate 100%** — every source commit includes test changes (measures co-modification, not coverage).
 
 ### Cross-Reference Synthesis
 
-- **InterestReceiver.sol is #1 in churn AND #1 in attack surfaces** — all epoch rollover and donation concerns route through `_calculateClaim` → highest-leverage review target.
-- **`6ff3047` removed 11 guards while adding custom errors** — worth diffing to confirm no guard was dropped unintentionally during the OZ v5.3 migration.
-- **Fund flows and signatures changed in every commit** — 3/3 commits touch both areas; the permit + deposit/withdraw paths have been continuously reworked.
+- **InterestDispatcher.sol is #1 in both churn AND attack-surface priority** — owner UUPS authority + fund_flows area → highest-leverage review: `claim()`, `_calculateClaim()`, `_authorizeUpgrade`.
+- **Guard removal commit (6ff3047) overlaps fund_flows area** — removed guards in a security domain with 4 commits → elevated risk of missing protection.
 
 ---
 
 ## X-Ray Verdict
 
-**FRAGILE** — no timelock on claimer transfer, no pause mechanism, no admin controls beyond a single one-step role; 18-day codebase history from 2 developers with no merge commits.
+**FRAGILE** — Single EOA controls UUPS upgrades on InterestDispatcher with no timelock; all vault operations depend on receiver correctness. Test coverage is excellent (100% across all metrics) but lacks stateful fuzz and formal verification.
 
 **Structural facts:**
-1. 270 nSLOC across 3 contracts (vault + drip + adapter)
-2. 100% line/branch/statement coverage across all contracts (85 tests)
-3. 2 developers, 4 commits, 18-day history, no formal review process
-4. No admin/owner role, no pause, no timelock, no upgrade mechanism — claimer is the only privileged role
-5. All financial logic (epoch drip, share conversion) depends on OZ ERC4626 + custom drip math — no oracle, no liquidation, no external protocol integration beyond EURe token
+1. 255 nSLOC across 2 contracts (vault + receiver) and 2 interfaces.
+2. 1 upgradeable contract (InterestDispatcher, UUPS) with single-EOA upgrade authority, no timelock.
+3. 80 tests achieving 100% line/branch/statement/function coverage.
+4. 2 developers, 18-day history, no merge commits (no formal review process).
+5. 0 stateful fuzz tests, 0 formal verification, 0 fork tests.

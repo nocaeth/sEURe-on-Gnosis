@@ -15,3 +15,5 @@ docs/
 
 # Local audit / agent scratch (any `.plamen…` path)
 .plamen*
+security/plamen-*/
+lcov.info

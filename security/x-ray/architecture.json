@@ -1,0 +1,26 @@
+{
+  "title": "sEURe-on-Gnosis Architecture",
+  "nodes": [
+    {"id": "user", "label": "User", "subtitle": "Depositor / Withdrawer", "type": "actor", "row": 0},
+    {"id": "yield_bot", "label": "Yield Bot", "subtitle": "Funder", "type": "actor", "row": 0},
+    {"id": "deployer", "label": "Deployer", "subtitle": "Initial claimer", "type": "actor", "row": 0},
+    {"id": "adapter", "label": "SavingsEUReAdapter", "subtitle": "User entry point", "type": "protocol", "row": 1},
+    {"id": "receiver", "label": "InterestDispatcher", "subtitle": "Epoch drip engine", "type": "protocol", "row": 1},
+    {"id": "vault", "label": "SavingsEURe", "subtitle": "ERC-4626 vault", "type": "protocol", "row": 2},
+    {"id": "eure", "label": "EURe", "subtitle": "Monerium token", "type": "external", "row": 3}
+  ],
+  "edges": [
+    {"from": "user", "to": "adapter", "label": "deposit / withdraw"},
+    {"from": "yield_bot", "to": "receiver", "label": "fund EURe"},
+    {"from": "deployer", "to": "receiver", "label": "initialize / setClaimer"},
+    {"from": "adapter", "to": "receiver", "label": "claim (EOA only)"},
+    {"from": "adapter", "to": "vault", "label": "deposit / withdraw"},
+    {"from": "receiver", "to": "vault", "label": "drip EURe"},
+    {"from": "vault", "to": "eure", "label": "balanceOf / transfer"},
+    {"from": "adapter", "to": "eure", "label": "transferFrom"},
+    {"from": "receiver", "to": "eure", "label": "safeTransfer / balanceOf"}
+  ],
+  "groups": [
+    {"label": "Protocol", "nodes": ["adapter", "receiver", "vault"]}
+  ]
+}
