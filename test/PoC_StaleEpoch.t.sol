@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.20;
+pragma solidity 0.8.35;
 
 import {Test} from "forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
@@ -7,6 +7,7 @@ import {SavingsEURe} from "src/SavingsEURe.sol";
 import {InterestDispatcher} from "src/InterestDispatcher.sol";
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
 import {ERC1967Proxy} from "openzeppelin/proxy/ERC1967/ERC1967Proxy.sol";
+import {Gnosis} from "src/constants/Gnosis.sol";
 import {MockEURe} from "./Mocks/MockEURe.sol";
 
 contract PoCStaleEpoch is Test {
@@ -17,7 +18,7 @@ contract PoCStaleEpoch is Test {
     InterestDispatcher public rcvImpl;
     InterestDispatcher public rcv;
     SavingsEURe public sEURe;
-    IERC20 public eure = IERC20(0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430);
+    IERC20 public eure = IERC20(Gnosis.EURe);
     uint256 public epoch;
 
     function setUp() public {
@@ -26,7 +27,8 @@ contract PoCStaleEpoch is Test {
 
         vm.startPrank(deployer);
         rcvImpl = new InterestDispatcher();
-        rcv = InterestDispatcher(address(new ERC1967Proxy(address(rcvImpl), "")));
+        bytes memory initData = abi.encodeCall(InterestDispatcher.initialize, (deployer));
+        rcv = InterestDispatcher(address(new ERC1967Proxy(address(rcvImpl), initData)));
         sEURe = new SavingsEURe(address(rcv));
 
         deal(address(eure), deployer, 1 ether);
@@ -35,10 +37,10 @@ contract PoCStaleEpoch is Test {
 
         deal(address(eure), deployer, 200 ether);
         assertTrue(eure.transfer(address(rcv), 200 ether));
-        rcv.initialize(address(sEURe), deployer);
+        rcv.bootstrap(address(sEURe));
         vm.stopPrank();
 
-        epoch = rcv.epochLength();
+        epoch = rcv.EPOCH_LENGTH();
         deal(address(eure), alice, 1000 ether);
         deal(address(eure), bob, 1000 ether);
     }

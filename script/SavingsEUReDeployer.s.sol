@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-pragma solidity ^0.8.20;
+pragma solidity 0.8.35;
 
 import {Script} from "forge-std/Script.sol";
 import {console} from "forge-std/console.sol";
@@ -9,6 +9,9 @@ import {ERC1967Proxy} from "openzeppelin/proxy/ERC1967/ERC1967Proxy.sol";
 import {SavingsEURe} from "src/SavingsEURe.sol";
 import {InterestDispatcher} from "src/InterestDispatcher.sol";
 
+/// @title SavingsEUReDeployer
+/// @notice Forge script: deploys `InterestDispatcher` behind `ERC1967Proxy`, deploys `SavingsEURe`, funds the dispatcher, bootstraps, and seeds a small vault deposit.
+/// @dev Expects `MNEMONIC` (BIP-39, length check > 30 chars) or `PRIVATE_KEY` and runs only when `block.chainid == 100` (Gnosis).
 contract SavingsEUReDeployer is Script {
     using SafeERC20 for IERC20;
 
@@ -16,6 +19,8 @@ contract SavingsEUReDeployer is Script {
 
     error InvalidChain(uint256 chainId);
 
+    /// @notice Runs the full deployment sequence on Gnosis (`chainId` 100).
+    /// @custom:reverts InvalidChain when `block.chainid` is not `100`.
     function run() external {
         if (block.chainid != GNOSIS_CHAIN_ID) revert InvalidChain(block.chainid);
 
@@ -23,12 +28,14 @@ contract SavingsEUReDeployer is Script {
                                 KEY MANAGEMENT
         //////////////////////////////////////////////////////////////*/
 
-        uint256 deployerPrivateKey = 0;
+        // forge-lint: disable-next-line(unsafe-cheatcode)
         string memory mnemonic = vm.envString("MNEMONIC");
-
+        uint256 deployerPrivateKey;
         if (bytes(mnemonic).length > 30) {
+            // forge-lint: disable-next-line(unsafe-cheatcode)
             deployerPrivateKey = vm.deriveKey(mnemonic, 0);
         } else {
+            // forge-lint: disable-next-line(unsafe-cheatcode)
             deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         }
 
@@ -44,20 +51,20 @@ contract SavingsEUReDeployer is Script {
         console.log("Deployed InterestDispatcher implementation: %s", address(interestDispatcherImplementation));
 
         IERC20 eure = interestDispatcherImplementation.eure();
-        ERC1967Proxy proxy = new ERC1967Proxy(address(interestDispatcherImplementation), "");
+        bytes memory initData = abi.encodeCall(InterestDispatcher.initialize, (deployer));
+        ERC1967Proxy proxy = new ERC1967Proxy(address(interestDispatcherImplementation), initData);
         InterestDispatcher interestDispatcher = InterestDispatcher(address(proxy));
         console.log("Deployed InterestDispatcher proxy: %s", address(interestDispatcher));
 
         SavingsEURe savingsEURe = new SavingsEURe(address(interestDispatcher));
         console.log("Deployed sEURe: %s", address(savingsEURe));
 
-        // Fund and initialize the receiver in the same broadcast to prevent
-        // front-running the public initializer (C-01).
+        // Owner is set atomically in the proxy constructor (OZ v5.6+). Fund then bootstrap in the same broadcast.
         uint256 receiverFunding = 101 ether;
         eure.forceApprove(address(interestDispatcher), receiverFunding);
         eure.safeTransfer(address(interestDispatcher), receiverFunding);
-        interestDispatcher.initialize(address(savingsEURe), deployer);
-        console.log("Initialized InterestDispatcher with %s EURe", receiverFunding);
+        interestDispatcher.bootstrap(address(savingsEURe));
+        console.log("Bootstrapped InterestDispatcher with %s EURe", receiverFunding);
 
         uint256 initialDeposit = 1 ether;
         eure.forceApprove(address(savingsEURe), initialDeposit);

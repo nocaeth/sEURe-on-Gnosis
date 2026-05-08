@@ -44,20 +44,22 @@ sDAI uses `SavingsXDaiAdapter` as the user-facing entrypoint that bundles claim 
 
 - SavingsEURe calls `_claimInterest()` before every `deposit`, `mint`, `withdraw`, and `redeem`
 - The vault stores an immutable `interestDispatcher` address and an `interestClaimingEnabled` flag
-- Only the interest receiver can call `enableInterestClaiming()` (called during its own `initialize()`)
+- Only the interest receiver can call `enableInterestClaiming()` (called during `bootstrap()`)
 - No separate adapter contract, `ISavingsEUReAdapter` interface, or periphery directory
 
 This eliminates an entire contract and removes the EOA-only claim restriction (`msg.sender == tx.origin` in the adapter). Claims now fire for all vault interactions regardless of caller type.
 
-### InterestDispatcher is now UUPS upgradeable
+### InterestDispatcher is now UUPS upgradeable (ERC-7201 storage)
 
 sDAI's `BridgeInterestDispatcher` is an immutable deployed contract. sEURe's `InterestDispatcher` is deployed behind an `ERC1967Proxy` and uses the UUPS upgrade pattern:
 
 - `constructor()` calls `_disableInitializers()` — implementation is logic-only
-- `initialize(address vault, address owner_)` sets vault reference and upgrade authority through the proxy
+- `initialize(address owner_)` runs once via the proxy constructor `_data` (`abi.encodeCall`) — sets `owner` only (OpenZeppelin v5.6+ forbids deploying `ERC1967Proxy` with empty `_data`)
+- `bootstrap(address vault_)` (`reinitializer(2)`, `onlyOwner`) wires `vault`, calls `enableInterestClaiming()`, checks `MIN_INITIAL_BALANCE`, and starts the first epoch (`Bootstrapped` event)
+- Module state lives in an ERC-7201 namespaced struct at `@custom:storage-location erc7201:noca.savings_eure.interest_dispatcher` (slot `0x9164f8c205381b64e458ee01bc88d5de773af3a65d86bd29c05ea24ac702cd00`) — no linear `_gap` in the implementation's global layout for module fields
 - `_authorizeUpgrade()` gates upgrades to `owner`
 - `transferOwnership(address newOwner)` allows ownership transfer
-- `sEURe` reference is no longer `immutable` (set during `initialize` through the proxy)
+- `vault` is set during `bootstrap` (not `immutable`; lives in namespaced storage)
 
 ### `claimer` role replaced with permissionless claims + `owner`
 
@@ -87,20 +89,23 @@ if ((balance - claimable) < 1000 ether) {
 }
 ```
 
-**sEURe fix (`InterestDispatcher.sol`):**
+**sEURe fix (`InterestDispatcher.sol`):** the stale-ledger issue is addressed in the current `_computeClaimable` / `_simulateClaim` / `_applyRollover` flow — after a full epoch, intra-epoch balance used for the next step is zeroed; when a rollover would leave less than `DRIP_PAUSE_THRESHOLD` (**100 EURe**), the drip **pauses** and the epoch book is cleared (sDAI’s analogous branch used **1000 xDAI**).
+
+Illustrative (not a verbatim paste of today’s helpers):
+
 ```solidity
 if (unclaimedTime >= epochLength) {
     claimable = currentEpochBalance;
-    currentEpochBalance = 0;  // ADDED
+    currentEpochBalance = 0;  // ADDED — full-epoch branch
 }
 // ...
-if ((balance - claimable) < 1000 ether) {
+if ((balance - claimable) < PAUSE_THRESHOLD) { // 100 EURe in sEURe; 1000 xDAI in sDAI
     dripRate = 0;
-    currentEpochBalance = 0;  // ADDED
+    currentEpochBalance = 0;  // ADDED — low-balance / pause branch
 }
 ```
 
-**Why:** When the receiver drains below 1000 and `dripRate` is set to 0, `currentEpochBalance` retained its stale value. If new funds arrived and a full epoch passed, `claim()` would attempt to transfer the stale (large) `currentEpochBalance` from a smaller actual balance, causing an arithmetic underflow revert. This permanently bricks the drip mechanism until the balance exceeds the stale value. In sDAI this is unlikely due to continuous bridge funding. In sEURe with periodic bot deposits, it's a real scenario.
+**Why:** When the receiver drains below the pause threshold and `dripRate` is set to 0, `currentEpochBalance` must not retain a stale value. If new funds arrived and a full epoch passed, `claim()` would attempt to transfer the stale (large) `currentEpochBalance` from a smaller actual balance, causing an arithmetic underflow revert. This permanently bricks the drip mechanism until the balance exceeds the stale value. In sDAI this is unlikely due to continuous bridge funding. In sEURe with periodic bot deposits, it's a real scenario.
 
 ### 2. `adapter.mint()` rounding mismatch (Medium)
 
@@ -134,11 +139,17 @@ The vault calls `_claimInterest()` before share-changing operations. If `interes
 
 The default offset of 0 leaves the vault vulnerable to the first-depositor inflation attack (attacker deposits 1 wei, donates large amount, next depositor gets ~0 shares). With offset 3, the virtual share multiplier is 1000x, making this attack 1000x more expensive. sDAI's ship has sailed (already has liquidity), but sEURe gets this protection at deploy.
 
-### 5. `initialize()` gated by proxy + OpenZeppelin initializer
+### 5. Two-phase proxy init: `initialize(owner)` + `bootstrap(vault)` + OpenZeppelin v5.6 proxy rules
 
-**Uses OpenZeppelin's `initializer` modifier via `ERC1967Proxy`.**
+**Phase 1 — `initialize(address owner_)` (`initializer`):** Sets UUPS `owner` only. Intended to run inside `ERC1967Proxy`'s constructor via encoded `_data`, so the owner is bound before any separate transaction can race.
 
-In sDAI, `initialize()` is permissionless — anyone can call it once the balance threshold is met. A front-runner could initialize at a suboptimal moment, permanently locking in bad epoch parameters on an immutable contract. sEURe solves this structurally: the implementation's constructor disables initializers, so `initialize()` can only be called once through the proxy during the deployment broadcast. The `owner` is set at that time.
+**Phase 2 — `bootstrap(address vault_)` (`reinitializer(2)`):** Only `owner` may call. Wires `vault`, invokes `SavingsEURe.enableInterestClaiming()`, requires EURe balance ≥ `MIN_INITIAL_BALANCE`, and starts epoch/drip state (`Bootstrapped` event).
+
+OpenZeppelin Contracts v5.6+ mandates non-empty `_data` on `ERC1967Proxy` construction (or `ERC1967ProxyUninitialized`). Together with constructor-bound `owner`, a third party cannot seize the initializer or become `owner`; only `bootstrap` remains public and it is `onlyOwner`.
+
+### 5b. ERC-7201 namespaced storage for `InterestDispatcher`
+
+Receiver fields (`vault`, `owner`, `dripRate`, `nextClaimEpoch`, `currentEpochBalance`, `lastClaimTimestamp`) are stored in a single struct at an ERC-7201-derived slot (`erc7201:noca.savings_eure.interest_dispatcher`), following the same pattern as OpenZeppelin's `Initializable` (`@custom:storage-location erc7201:...`). This removes reliance on a large storage `_gap` for future implementation changes and keeps module state out of the default Solidity layout slot sequence.
 
 ### 6. `vaultAPY()` division-by-zero guard
 
@@ -190,15 +201,15 @@ The receiver now uses `NotInitialized`, `NotOwner`, `InsufficientInitialBalance`
 
 ### 14. InterestDispatcher operational events
 
-**Added `Initialized` and `OwnerUpdated` events.**
+**`Bootstrapped` (epoch bootstrap) and `OwnerUpdated` events.**
 
-The receiver already emitted `Claimed`; initialization and upgrade ownership transfers are now also visible to indexers, dashboards, and deployment checks.
+The receiver already emitted `Claimed`; `bootstrap` completion and upgrade ownership transfers are visible to indexers, dashboards, and deployment checks. OpenZeppelin `Initializable` also emits `Initialized` when the `initializer` / `reinitializer` modifiers complete.
 
 ### 15. InterestDispatcher NatSpec and explicit policy constants
 
 **Documented the receiver, interface, public state, role model, APY semantics, and thresholds.**
 
-The previously inline balance threshold is now the named constant `MIN_EPOCH_BALANCE`, used both for initialization and epoch renewal.
+The previously inline balance threshold is now the named constant `MIN_INITIAL_BALANCE`, used both for `bootstrap` and epoch renewal logic.
 
 ---
 
@@ -208,9 +219,9 @@ The previously inline balance threshold is now the named constant `MIN_EPOCH_BAL
 
 sDAI declares `epochLength` as a storage variable (costs ~2100 gas cold SLOAD per read). It has no setter and never changes. sEURe declares it `constant`, eliminating the storage slot entirely.
 
-### 17. Removed duplicate `vault` variable
+### 17. Single `vault` reference in namespaced storage
 
-sDAI's `BridgeInterestDispatcher` stores both `address public vault` and `SavingsXDai private sDAI` pointing to the same contract. sEURe uses a single `ISavingsEURe public override sEURe` (set during `initialize` for UUPS compatibility) and references `address(sEURe)` where needed.
+sDAI's `BridgeInterestDispatcher` stores both `address public vault` and `SavingsXDai private sDAI` pointing to the same contract. sEURe uses a single `ISavingsEURe vault` in ERC-7201 storage (exposed via `vault()`), set during `bootstrap`.
 
 ### 18. Removed unused imports and custom signature plumbing
 
@@ -222,9 +233,9 @@ sDAI's `BridgeInterestDispatcher` stores both `address public vault` and `Saving
 
 The original name implied aggregation across multiple balance sources (native xDAI + WXDAI). In sEURe it's a single `eure.balanceOf()` call. Renamed for clarity.
 
-### 20. Internal claim state math
+### 20. Internal claim state math + `previewClaimable`
 
-`claim()` uses a single internal `_calculateClaim()` path to derive the claimed amount and next epoch state. The external `previewClaimable()` view was removed to keep the receiver interface focused on the mutation path used by the vault and keepers.
+`claim()` uses internal `_simulateClaim` / `_computeClaimable` paths. The external `previewClaimable()` view mirrors the same schedule so `SavingsEURe.totalAssets()` can include pending drip before `interestClaimingEnabled` is lifted (returns 0 until `bootstrap`).
 
 ---
 
@@ -232,8 +243,8 @@ The original name implied aggregation across multiple balance sources (native xD
 
 | Parameter | sDAI | sEURe | Rationale |
 |-----------|------|-------|-----------|
-| Init minimum | 30,000 | 100 | Lower barrier for a new product to go live |
-| Epoch minimum | 1,000 | 100 | Lower threshold for bot-funded EURe epochs |
+| Init minimum (`bootstrap`) | 30,000 xDAI | 1 EURe (`MIN_INITIAL_BALANCE` = 1 ether) | Lower barrier for a new product to go live |
+| Post-claim pause threshold (new epoch) | 1,000 xDAI | 100 EURe (`DRIP_PAUSE_THRESHOLD` = 100 ether) | Rollover pauses drips when the receiver’s balance after a claim would stay below this |
 | Epoch length | 3 days | 5 days | Slower drip cadence for sEURe |
 | First epoch | 6 days | 5 days | No special bridge-integration lag; uses regular epoch length |
 
@@ -243,10 +254,10 @@ The original name implied aggregation across multiple balance sources (native xD
 
 | Library | sDAI | sEURe |
 |---------|------|-------|
-| OpenZeppelin | v5.x (untagged commit) | v5.3.0 (tagged, audited) |
-| forge-std | unknown (submodule not populated) | v1.15.0 |
+| OpenZeppelin | v5.x (untagged commit) | v5.6.1 (tagged) |
+| forge-std | unknown (submodule not populated) | v1.16.1 |
 
-All in-repo Solidity files now use standard SPDX identifiers and `pragma solidity ^0.8.20`, matching the OpenZeppelin v5.3.0 dependency baseline.
+Solidity in this repo is pinned to `0.8.35` in `foundry.toml` (aligned with OpenZeppelin v5.6.x pragmas).
 
 ---
 

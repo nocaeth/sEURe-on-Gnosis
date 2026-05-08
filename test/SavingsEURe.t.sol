@@ -1,24 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.20;
+pragma solidity 0.8.35;
 
 import {Vm} from "forge-std/Vm.sol";
-import {console} from "forge-std/console.sol";
-import {SetupTest} from "./Setup.t.sol";
+import {SetupTestBase} from "./Setup.t.sol";
 import {MockMultisig} from "./Mocks/MockMultisig.sol";
 import {ISavingsEURe} from "src/interfaces/ISavingsEURe.sol";
 import {SavingsEURe} from "src/SavingsEURe.sol";
 
-contract SavingsEUReTest is SetupTest {
+contract SavingsEUReTest is SetupTestBase {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
     uint256 constant SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
 
     function testMetadata() public view {
-        assertEq(address(rcv), address(rcv));
         assertEq(sEURe.name(), "Savings EURe");
         assertEq(sEURe.symbol(), "sEURe");
         assertEq(sEURe.asset(), address(eure));
+    }
+
+    function testReceiveRevertsNoNativeDeposits() public {
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        (bool success, bytes memory returndata) = payable(address(sEURe)).call{value: 1 wei}("");
+        assertFalse(success);
+        assertEq(returndata, abi.encodeWithSelector(ISavingsEURe.NoNativeDeposits.selector));
     }
 
     function testInterestDispatcherIsConfiguredAtDeploymentAndImmutable() public {
@@ -96,10 +102,6 @@ contract SavingsEUReTest is SetupTest {
         vm.expectEmit();
         emit Transfer(address(0), receiver, sEURe.previewDeposit(assets));
         uint256 shares = sEURe.deposit(assets, receiver);
-        console.log("totalAssets: %e", sEURe.totalAssets());
-        console.log("previewDeposit: %e", sEURe.previewDeposit(assets));
-        console.log("previewRedeem: %e", sEURe.previewRedeem(sEURe.balanceOf(receiver)));
-        console.log("maxWithdraw: %e", sEURe.maxWithdraw(receiver));
         assertEq(sEURe.balanceOf(receiver), shares + initialShares);
         assertGe(sEURe.totalAssets(), sEURe.maxWithdraw(receiver));
         assertEq(eure.balanceOf(receiver), initialBalance - assets);
@@ -149,10 +151,14 @@ contract SavingsEUReTest is SetupTest {
     }
 
     function testFuzzWithdraw(uint256 assets) public {
+        initializeReceiver();
         address receiver = alice;
         address owner = alice;
 
-        testDeposit();
+        vm.startPrank(alice);
+        eure.approve(address(sEURe), eure.balanceOf(alice));
+        sEURe.deposit(1e18, receiver);
+        vm.stopPrank();
 
         vm.startPrank(alice);
 
@@ -173,10 +179,14 @@ contract SavingsEUReTest is SetupTest {
     }
 
     function testFuzzRedeem(uint256 shares) public {
+        initializeReceiver();
         address receiver = alice;
         address owner = alice;
 
-        testDeposit();
+        vm.startPrank(alice);
+        eure.approve(address(sEURe), eure.balanceOf(alice));
+        sEURe.deposit(1e18, receiver);
+        vm.stopPrank();
 
         uint256 initialAssets = eure.balanceOf(receiver);
         uint256 initialShares = sEURe.balanceOf(owner);
@@ -187,7 +197,6 @@ contract SavingsEUReTest is SetupTest {
         vm.expectEmit();
         emit Transfer(receiver, address(0), shares);
         uint256 assets = sEURe.redeem(shares, receiver, owner);
-        console.log("assets: %e %e", initialAssets, assets);
         assertEq(sEURe.balanceOf(owner), initialShares - shares);
         assertGe(sEURe.totalAssets(), sEURe.maxWithdraw(receiver));
         assertEq(eure.balanceOf(receiver), initialAssets + assets);
@@ -259,6 +268,27 @@ contract SavingsEUReTest is SetupTest {
         vm.stopPrank();
 
         assertLe(eure.balanceOf(bob), bobBalanceBefore);
+    }
+
+    /// @dev Regression: `previewDeposit` must match `deposit` when pending receiver yield is included in `totalAssets`.
+    function testPreviewDepositMatchesDepositAfterYieldAccrues() public {
+        vm.startPrank(initializer);
+        eure.approve(address(sEURe), 1 ether);
+        sEURe.deposit(1 ether, initializer);
+        deal(address(eure), address(rcv), 10001 ether);
+        rcv.bootstrap(address(sEURe));
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + rcv.EPOCH_LENGTH() / 2);
+
+        uint256 previewShares = sEURe.previewDeposit(10 ether);
+
+        vm.startPrank(alice);
+        eure.approve(address(sEURe), 10 ether);
+        uint256 actualShares = sEURe.deposit(10 ether, alice);
+        vm.stopPrank();
+
+        assertEq(actualShares, previewShares);
     }
 
     // checks that all deposit functions from deposit and mint return the same shares given equivalent inputs.
@@ -454,7 +484,7 @@ contract SavingsEUReTest is SetupTest {
     }
 }
 
-contract SavingsEUReConstructorTest is SetupTest {
+contract SavingsEUReConstructorTest is SetupTestBase {
     function testConstructorRevertsOnZeroAddressInterestDispatcher() public {
         vm.expectRevert(ISavingsEURe.InvalidInterestDispatcher.selector);
         new SavingsEURe(address(0));

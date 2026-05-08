@@ -11,7 +11,7 @@ Underlying EURe on Gnosis: `0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430`.
 | Contract | Description |
 |----------|-------------|
 | `SavingsEURe` | ERC-4626 vault; 3-decimal offset vs EURe; claims interest before share-changing ops; EIP-712 permit with `bytes` signature (EOA + ERC-1271) and legacy `v,r,s` overload |
-| `InterestDispatcher` | UUPS-upgradeable epoch-based drip into the vault; deployed behind ERC1967Proxy; `initialize()` requires balance above `MIN_EPOCH_BALANCE` (100 EURe) |
+| `InterestDispatcher` | UUPS-upgradeable epoch-based drip into the vault; deployed behind `ERC1967Proxy` with `initialize(owner)` in constructor `_data` (OZ v5.6+); owner-only `bootstrap(vault)` wires the vault and requires balance ≥ `MIN_INITIAL_BALANCE` (1 EURe); ERC-7201 namespaced storage; rollover pauses new drips when post-claim balance is below `DRIP_PAUSE_THRESHOLD` (100 EURe) |
 
 ## Security and Integration Notes
 
@@ -31,6 +31,13 @@ forge build
 forge test
 ```
 
+Coverage (summary + `lcov.info`; HTML via `genhtml` if installed):
+
+```bash
+make coverage
+make coverage-html
+```
+
 Verbose tests (same as `make tests`):
 
 ```bash
@@ -41,24 +48,27 @@ make tests
 
 Set `RPC_GNOSIS` or `RPC_CHIADO` (see `foundry.toml` `[rpc_endpoints]`). The deployer script expects either a long `MNEMONIC` string (path `0` via `vm.deriveKey`) or `PRIVATE_KEY`.
 
-**Gnosis Chain** (broadcast + verify):
+**Gnosis Chain** (`chainId` 100, broadcast + verify):
 
 ```bash
 make deploy-gnosis
 ```
 
-**Chiado** (broadcast, no verify in Makefile):
+Deploy sequence: `InterestDispatcher` implementation → `ERC1967Proxy` with `abi.encodeCall(InterestDispatcher.initialize, (deployer))` so the upgrade owner is set atomically (OpenZeppelin v5.6+ requires non-empty proxy init data) → `SavingsEURe` (proxy as interest receiver) → fund the proxy with **101 EURe** → `bootstrap(vault)` (owner-only) → seed the vault with **1 EURe** — all in one broadcast so `bootstrap` cannot be front-run by a non-owner.
+
+**Chiado** (Makefile only; not supported by the stock script):
 
 ```bash
 make deploy-chiado
 ```
 
-The script deploys `InterestDispatcher` implementation → `ERC1967Proxy` → `SavingsEURe` (with proxy address as interest receiver), funds and initializes the receiver, then seeds the vault with 1 EURe — all in a single broadcast to prevent front-running the initializer.
+`script/SavingsEUReDeployer.s.sol` **reverts unless `block.chainid == 100`** (`InvalidChain`). The Chiado target runs Forge against the `chiado` RPC but needs a script change (allow Chiado’s `chainId` and any testnet token addresses) before it can succeed.
 
 ## Security
 
-- [Audit report](AUDIT_REPORT.md)
+- [Audit report](security/AUDIT_REPORT.md)
 - [X-ray / protocol review notes](security/x-ray/x-ray.md) (entry points, invariants, architecture diagram)
+- [Upgradeable storage layout (ERC-7201)](security/STORAGE_LAYOUT.md)
 
 ## Changes from sDAI
 

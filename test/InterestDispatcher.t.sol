@@ -1,74 +1,102 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity ^0.8.20;
+pragma solidity 0.8.35;
 
 import {console} from "forge-std/console.sol";
 import {ERC1967Proxy} from "openzeppelin/proxy/ERC1967/ERC1967Proxy.sol";
 import {InterestDispatcher} from "src/InterestDispatcher.sol";
-import {SetupTest} from "./Setup.t.sol";
+import {IInterestDispatcher} from "src/interfaces/IInterestDispatcher.sol";
+import {SetupTestBase} from "./Setup.t.sol";
+import {InterestDispatcherV2} from "./Mocks/InterestDispatcherV2.sol";
 import {MockEURe} from "./Mocks/MockEURe.sol";
 
-contract InterestDispatcherV2 is InterestDispatcher {
-    function version() external pure returns (uint256) {
-        return 2;
-    }
-}
-
-contract InterestDispatcherTest is SetupTest {
-    event Initialized(uint256 indexed initialBalance, uint256 dripRate, uint256 nextClaimEpoch);
+contract InterestDispatcherTest is SetupTestBase {
+    event Bootstrapped(uint256 firstEpochBalance, uint256 firstDripRate, uint256 firstEpochEnd);
     event OwnerUpdated(address indexed previousOwner, address indexed newOwner);
+    event Claimed(address indexed vault, uint256 amount);
+    event EpochRolled(uint256 newDripRate, uint256 newEpochBalance, uint256 nextEpoch);
+    event DripPaused(uint256 remainingBalance);
+    event Transfer(address indexed from, address indexed to, uint256 value);
 
     /*//////////////////////////////////////////////////////////////
                         BASIC VALIDATION
     //////////////////////////////////////////////////////////////*/
-    function testMetadata() public view {
-        assertEq(address(rcv), address(rcv));
-        assertEq(sEURe.name(), "Savings EURe");
-        assertEq(sEURe.symbol(), "sEURe");
-        assertEq(sEURe.asset(), address(eure));
-    }
 
     function testAlreadyInitialized() public {
         initializeReceiver();
         vm.startPrank(initializer);
         vm.expectRevert(abi.encodeWithSignature("InvalidInitialization()"));
-        rcv.initialize(address(sEURe), initializer);
+        rcv.initialize(initializer);
     }
 
-    function testInitialize_rejectsZeroVault() external {
+    function testBootstrap_rejectsZeroVault() external {
         deal(address(eure), address(rcv), 50000 ether);
         vm.startPrank(initializer);
         vm.expectRevert(bytes4(keccak256("ZeroAddress()")));
-        rcv.initialize(address(0), initializer);
+        rcv.bootstrap(address(0));
         vm.stopPrank();
     }
 
-    function testInitialize_rejectsZeroOwner() external {
+    function testBootstrap_rejectsNonOwner() external {
         deal(address(eure), address(rcv), 50000 ether);
+        vm.prank(alice);
+        vm.expectRevert(bytes4(keccak256("NotOwner()")));
+        rcv.bootstrap(address(sEURe));
+    }
+
+    function testBootstrap_revertsWhenAlreadyBootstrapped() external {
+        initializeReceiver();
         vm.startPrank(initializer);
-        vm.expectRevert(bytes4(keccak256("ZeroAddress()")));
-        rcv.initialize(address(sEURe), address(0));
+        vm.expectRevert(abi.encodeWithSignature("InvalidInitialization()"));
+        rcv.bootstrap(address(sEURe));
         vm.stopPrank();
     }
 
-    function testInitialize_notEnoughBalance() external {
-        vm.startPrank(initializer);
-        deal(address(eure), address(rcv), rcv.MIN_EPOCH_BALANCE() - 1);
-        vm.expectRevert(bytes4(keccak256("InsufficientInitialBalance()")));
-        rcv.initialize(address(sEURe), initializer);
+    function testInitialize_rejectsZeroOwnerInProxyConstructor() external {
+        InterestDispatcher impl = new InterestDispatcher();
+        bytes memory badInit = abi.encodeCall(InterestDispatcher.initialize, (address(0)));
+        vm.expectRevert(bytes4(keccak256("ZeroAddress()")));
+        new ERC1967Proxy(address(impl), badInit);
     }
 
-    function testInitializeEmitsInitialized() external {
+    function testBootstrap_notEnoughBalance() external {
+        vm.startPrank(initializer);
+        deal(address(eure), address(rcv), rcv.MIN_INITIAL_BALANCE() - 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IInterestDispatcher.InsufficientInitialBalance.selector,
+                rcv.MIN_INITIAL_BALANCE() - 1,
+                rcv.MIN_INITIAL_BALANCE()
+            )
+        );
+        rcv.bootstrap(address(sEURe));
+    }
+
+    function testBootstrap_acceptsBalanceBetweenMinInitialAndPauseThreshold() external {
+        uint256 seed = 50 ether;
+        deal(address(eure), address(rcv), seed);
+        vm.startPrank(initializer);
+        rcv.bootstrap(address(sEURe));
+        vm.stopPrank();
+        assertEq(rcv.currentEpochBalance(), seed);
+        assertGt(rcv.dripRate(), 0);
+        assertLt(seed, rcv.DRIP_PAUSE_THRESHOLD());
+        assertGe(seed, rcv.MIN_INITIAL_BALANCE());
+    }
+
+    function testBootstrapEmitsBootstrapped() external {
         uint256 initialBalance = 50000 ether;
         deal(address(eure), address(rcv), initialBalance);
 
         vm.startPrank(initializer);
         vm.expectEmit(true, true, true, true);
-        emit Initialized(initialBalance, initialBalance / rcv.epochLength(), block.timestamp + rcv.epochLength());
-        rcv.initialize(address(sEURe), initializer);
+        emit Bootstrapped(
+            initialBalance, initialBalance / rcv.EPOCH_LENGTH(), block.timestamp + rcv.EPOCH_LENGTH()
+        );
+        rcv.bootstrap(address(sEURe));
         vm.stopPrank();
     }
 
-    function testInitializeEnablesVaultInterestClaiming() external {
+    function testBootstrapEnablesVaultInterestClaiming() external {
         uint256 initialBalance = 50000 ether;
         deal(address(eure), address(rcv), initialBalance);
 
@@ -78,7 +106,7 @@ contract InterestDispatcherTest is SetupTest {
         assertFalse(abi.decode(beforeData, (bool)));
 
         vm.startPrank(initializer);
-        rcv.initialize(address(sEURe), initializer);
+        rcv.bootstrap(address(sEURe));
         vm.stopPrank();
 
         (bool afterSuccess, bytes memory afterData) =
@@ -92,7 +120,7 @@ contract InterestDispatcherTest is SetupTest {
         deal(address(eure), address(implementation), 50000 ether);
 
         vm.expectRevert(abi.encodeWithSignature("InvalidInitialization()"));
-        implementation.initialize(address(sEURe), initializer);
+        implementation.initialize(initializer);
     }
 
     function testImplementationClaimRevertsAfterInitializersDisabled() external {
@@ -124,7 +152,7 @@ contract InterestDispatcherTest is SetupTest {
         vm.stopPrank();
 
         assertEq(InterestDispatcherV2(address(rcv)).version(), 2);
-        assertEq(address(rcv.sEURe()), address(sEURe));
+        assertEq(address(rcv.vault()), address(sEURe));
         assertEq(rcv.owner(), initializer);
     }
 
@@ -193,12 +221,12 @@ contract InterestDispatcherTest is SetupTest {
     }
 
     function testClaim() public {
-        testTopInterestDispatcher();
+        assertReceiverTopUpIsAccountingOnly();
         initializeReceiver();
         uint256 shares = sEURe.totalSupply();
         uint256 totalWithdrawable = sEURe.previewRedeem(shares);
         skipTime(1 days);
-        testTopInterestDispatcher();
+        assertReceiverTopUpIsAccountingOnly();
         uint256 sEuReBalance = eure.balanceOf(address(sEURe));
         uint256 rcvBalance = eure.balanceOf(address(rcv));
         uint256 claimed = claimEoa();
@@ -210,10 +238,44 @@ contract InterestDispatcherTest is SetupTest {
         console.log("Claimed %e", claimed);
     }
 
+    /// @dev Branch ladder shared by both phases of `testFuzzClaim`.
+    function _assertFuzzClaimPhase(
+        uint256 endEpoch,
+        uint256 lastClaimTime,
+        uint256 beforeRate,
+        uint256 rcvBalance,
+        uint256 epochBalance,
+        uint256 claimed
+    ) internal view {
+        if (globalTime == lastClaimTime) {
+            assertEq(claimed, 0);
+            assertGe(eure.balanceOf(address(rcv)), rcvBalance);
+        } else if (globalTime >= lastClaimTime + epoch) {
+            assertEq(claimed, epochBalance);
+            if (rcvBalance - claimed >= epoch && globalTime != endEpoch) {
+                assertEq(rcv.nextClaimEpoch(), block.timestamp + epoch);
+                assertGt(rcv.dripRate(), 0);
+            }
+            assertLe(eure.balanceOf(address(rcv)), rcvBalance);
+        } else if (globalTime > endEpoch) {
+            if (beforeRate > 0) {
+                assertGt(claimed, 0);
+            }
+
+            if (rcvBalance - claimed >= epoch) {
+                assertEq(rcv.nextClaimEpoch(), block.timestamp + epoch);
+                assertGt(rcv.dripRate(), 0);
+            }
+            assertLe(eure.balanceOf(address(rcv)), rcvBalance);
+        } else {
+            assertEq(epochBalance - claimed, rcv.currentEpochBalance());
+            assertLe(eure.balanceOf(address(rcv)), rcvBalance);
+        }
+    }
+
     function testFuzzClaim(uint256 time) public {
         initializeReceiver();
         time = bound(time, 0, 2 days);
-        require(time >= 0 && time <= 2 days);
         console.log("GlobalTime: %s | Time: %s | CurrentTime: %s", globalTime, time, block.timestamp);
         console.log(
             "nextClaimEpoch: %s | lastClaimTimestamp: %s | dripRate: %s",
@@ -224,7 +286,7 @@ contract InterestDispatcherTest is SetupTest {
 
         uint256 shares = sEURe.totalSupply();
         uint256 totalWithdrawable = sEURe.previewRedeem(shares);
-        testTopInterestDispatcher();
+        assertReceiverTopUpIsAccountingOnly();
         uint256 sEuReBalance = eure.balanceOf(address(sEURe));
         uint256 rcvBalance = eure.balanceOf(address(rcv));
 
@@ -244,36 +306,12 @@ contract InterestDispatcherTest is SetupTest {
             rcv.dripRate()
         );
 
-        if (globalTime == lastClaimTime) {
-            assertEq(claimed, 0);
-            assertGe(eure.balanceOf(address(rcv)), rcvBalance);
-        } else if (globalTime >= lastClaimTime + epoch) {
-            assertEq(claimed, epochBalance);
-            if (rcvBalance - claimed >= epoch && globalTime != endEpoch) {
-                assertEq(rcv.nextClaimEpoch(), block.timestamp + epoch);
-                assertGt(rcv.dripRate(), 0);
-            }
-            assertLe(eure.balanceOf(address(rcv)), rcvBalance);
-        } else if (globalTime > endEpoch) {
-            if (beforeRate > 0) {
-                assertGt(claimed, 0);
-            }
-
-            if (rcvBalance - claimed >= epoch) {
-                assertEq(rcv.nextClaimEpoch(), block.timestamp + epoch);
-                assertGt(rcv.dripRate(), 0);
-            }
-            assertLe(eure.balanceOf(address(rcv)), rcvBalance);
-        } else {
-            assertEq(epochBalance - claimed, rcv.currentEpochBalance());
-            assertLe(eure.balanceOf(address(rcv)), rcvBalance);
-        }
+        _assertFuzzClaimPhase(endEpoch, lastClaimTime, beforeRate, rcvBalance, epochBalance, claimed);
 
         assertEq(eure.balanceOf(address(rcv)), rcvBalance - claimed);
         assertEq(claimed, eure.balanceOf(address(sEURe)) - sEuReBalance);
         assertEq(sEURe.totalSupply(), shares);
         assertLe(sEuReBalance, sEURe.totalAssets());
-        assertEq(sEURe.totalSupply(), shares);
         assertLe(totalWithdrawable, sEURe.previewRedeem(shares));
 
         vm.startPrank(bob);
@@ -293,30 +331,7 @@ contract InterestDispatcherTest is SetupTest {
             rcv.lastClaimTimestamp(),
             rcv.dripRate()
         );
-        if (globalTime == lastClaimTime) {
-            assertEq(claimed, 0);
-            assertGe(eure.balanceOf(address(rcv)), rcvBalance);
-        } else if (globalTime >= lastClaimTime + epoch) {
-            assertEq(claimed, epochBalance);
-            if (rcvBalance - claimed >= epoch && globalTime != endEpoch) {
-                assertEq(rcv.nextClaimEpoch(), block.timestamp + epoch);
-                assertGt(rcv.dripRate(), 0);
-            }
-            assertLe(eure.balanceOf(address(rcv)), rcvBalance);
-        } else if (globalTime > endEpoch) {
-            if (beforeRate > 0) {
-                assertGt(claimed, 0);
-            }
-
-            if (rcvBalance - claimed >= epoch) {
-                assertEq(rcv.nextClaimEpoch(), block.timestamp + epoch);
-                assertGt(rcv.dripRate(), 0);
-            }
-            assertLe(eure.balanceOf(address(rcv)), rcvBalance);
-        } else {
-            assertEq(epochBalance - claimed, rcv.currentEpochBalance());
-            assertLe(eure.balanceOf(address(rcv)), rcvBalance);
-        }
+        _assertFuzzClaimPhase(endEpoch, lastClaimTime, beforeRate, rcvBalance, epochBalance, claimed);
     }
 
     function skipFirstEpoch() public {
@@ -411,11 +426,40 @@ contract InterestDispatcherTest is SetupTest {
         uint256 epochBal = rcv.currentEpochBalance();
         assertEq(rate, epochBal / epoch);
         assertEq(rcv.nextClaimEpoch(), rcv.lastClaimTimestamp() + epoch);
+        uint256 preview = rcv.previewClaimable();
+        uint256 balBefore = eure.balanceOf(address(rcv));
+        vm.expectEmit(true, true, true, true);
+        emit Transfer(address(rcv), address(sEURe), preview);
+        vm.expectEmit(true, false, false, true);
+        emit Claimed(address(sEURe), preview);
+        vm.expectEmit(false, false, false, true);
+        emit DripPaused(balBefore - preview);
         uint256 claimed = claimEoa();
         assertEq(claimed, epochBal);
         assertEq(rcv.dripRate(), 0);
         assertEq(rcv.currentEpochBalance(), 0);
         assertEq(rcv.nextClaimEpoch(), block.timestamp - 1);
+    }
+
+    function testClaim_emitsEpochRolledWhenRolloverFundsNewEpoch() external {
+        initializeReceiver();
+        donateReceiverEure();
+        skipTime(epoch / 2);
+        claimEoa();
+        skipTime(epoch / 2 + 1);
+        uint256 bal = eure.balanceOf(address(rcv));
+        uint256 claimable = rcv.previewClaimable();
+        uint256 remaining = bal - claimable;
+        assertGe(remaining, rcv.DRIP_PAUSE_THRESHOLD());
+        uint256 nextDrip = remaining / epoch;
+        uint256 nextEnd = block.timestamp + epoch;
+        vm.expectEmit(true, true, true, true);
+        emit Transfer(address(rcv), address(sEURe), claimable);
+        vm.expectEmit(true, false, false, true);
+        emit Claimed(address(sEURe), claimable);
+        vm.expectEmit(false, false, false, true);
+        emit EpochRolled(nextDrip, remaining, nextEnd);
+        claimEoa();
     }
 
     function testClaim_endOfEpochWithNewDeposits() external {
@@ -510,9 +554,11 @@ contract InterestDispatcherTest is SetupTest {
                         VAULT APY & EDGE COVERAGE
     //////////////////////////////////////////////////////////////*/
 
-    function testVaultAPY_notInitialized() public {
+    function testVaultAPY_notBootstrapped() public {
         InterestDispatcher freshImplementation = new InterestDispatcher();
-        InterestDispatcher fresh = InterestDispatcher(address(new ERC1967Proxy(address(freshImplementation), "")));
+        bytes memory initData = abi.encodeCall(InterestDispatcher.initialize, (address(this)));
+        InterestDispatcher fresh =
+            InterestDispatcher(address(new ERC1967Proxy(address(freshImplementation), initData)));
         assertEq(fresh.vaultAPY(), 0);
     }
 
@@ -520,7 +566,7 @@ contract InterestDispatcherTest is SetupTest {
         initializeReceiver();
         donateReceiverEure();
         skipFirstEpoch();
-        skipTime(rcv.epochLength() + 1);
+        skipTime(rcv.EPOCH_LENGTH() + 1);
         vm.startPrank(bob, bob);
         rcv.claim();
         vm.stopPrank();
@@ -605,9 +651,9 @@ contract InterestDispatcherTest is SetupTest {
     /// drained by a prior partial claim but `dripRate` is unchanged — exercise the cap branch.
     function testClaim_calculateClaim_capsWhenLinearAccrualExceedsBook() public {
         vm.startPrank(initializer);
-        uint256 el = rcv.epochLength();
+        uint256 el = rcv.EPOCH_LENGTH();
         deal(address(eure), address(rcv), el * 1 ether);
-        rcv.initialize(address(sEURe), initializer);
+        rcv.bootstrap(address(sEURe));
         vm.stopPrank();
 
         skipTime(el - 1);
@@ -623,9 +669,10 @@ contract InterestDispatcherTest is SetupTest {
         vm.stopPrank();
     }
 
-    function testPreviewClaimable_notInitialized() public {
+    function testPreviewClaimable_notBootstrapped() public {
         InterestDispatcher freshImpl = new InterestDispatcher();
-        InterestDispatcher fresh = InterestDispatcher(address(new ERC1967Proxy(address(freshImpl), "")));
+        bytes memory initData = abi.encodeCall(InterestDispatcher.initialize, (address(this)));
+        InterestDispatcher fresh = InterestDispatcher(address(new ERC1967Proxy(address(freshImpl), initData)));
         assertEq(fresh.previewClaimable(), 0);
     }
 
